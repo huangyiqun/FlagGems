@@ -1389,3 +1389,21 @@ def test_moe_sum(shape, dtype):
     with flag_gems.use_gems():
         flag_gems.moe_sum(inp1, res_out)
     gems_assert_close(res_out, ref_out, dtype)
+
+
+@pytest.mark.fft_1d
+@pytest.mark.parametrize("N", 512)
+# @pytest.mark.parametrize("N", [2**d for d in range(2, 10, 1)])
+def test_fft_1d(N):
+    # ref: torch
+    ref_x = to_reference(input)
+    ref_out = torch.fft.fft(ref_x)
+    # FlagGems
+    input = torch.arange(N, device='cuda') + torch.arange(N, device='cuda') * 1j
+    output = torch.empty(N, device=flag_gems.device)
+    with flag_gems.use_gems():
+        flag_gems.fft_1d(input, output)
+    gems_assert_close(output, ref_out)
+
+
+
