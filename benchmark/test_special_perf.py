@@ -630,3 +630,28 @@ def test_perf_moe_align_block_size():
 
     bench.set_gems(gems_op)
     bench.run()
+
+
+@pytest.mark.fft_1d
+def test_perf_fft_1d():
+    def fft_1d_input_fn(N, dtype, device):
+        input_tensor = torch.arange(N, device='cuda') + torch.arange(N, device='cuda') * 1j
+        output_tensor = torch.empty(N, device=flag_gems.device)
+        yield input_tensor, output_tensor
+
+    def torch_op(input_tensor, output_tensor):
+        output_tensor.copy_(input_tensor.sum(dim=1))
+
+    def torch_op(input_tensor, output_tensor):
+        output_tensor.copy_(torch.fft.fft(input_tensor))
+
+    gems_op = flag_gems.fft_1d
+
+    bench = GenericBenchmarkExcluse1D(
+        input_fn=fft_1d_input_fn,
+        op_name="fft_1d",
+        torch_op=torch_op,
+        # dtypes=FLOAT_DTYPES,
+    )
+    bench.set_gems(gems_op)
+    bench.run()

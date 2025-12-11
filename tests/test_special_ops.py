@@ -1456,3 +1456,21 @@ def test_accuracy_moe_align_block_size(
     gems_assert_close(sorted_ids, sorted_ids_vllm, dtype=dtype)
     gems_assert_close(expert_ids, expert_ids_vllm, dtype=dtype)
     gems_assert_close(num_tokens_post_pad, num_tokens_post_pad_vllm, dtype=dtype)
+
+
+@pytest.mark.fft_1d
+@pytest.mark.parametrize("N", 512)
+# @pytest.mark.parametrize("N", [2**d for d in range(2, 10, 1)])
+def test_fft_1d(N):
+    # ref: torch
+    ref_x = to_reference(input)
+    ref_out = torch.fft.fft(ref_x)
+    # FlagGems
+    input = torch.arange(N, device='cuda') + torch.arange(N, device='cuda') * 1j
+    output = torch.empty(N, device=flag_gems.device)
+    with flag_gems.use_gems():
+        flag_gems.fft_1d(input, output)
+    gems_assert_close(output, ref_out)
+
+
+

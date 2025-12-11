@@ -232,6 +232,7 @@ from flag_gems.ops.where import (
 )
 from flag_gems.ops.zeros import zeros
 from flag_gems.ops.zeros_like import zeros_like
+from flag_gems.ops.fft_1d import fft_1d
 
 __all__ = [
     "_conv_depthwise2d",
@@ -522,4 +523,5 @@ __all__ = [
     "get_scheduler_metadata",
     "scaled_softmax_forward",
     "scaled_softmax_backward",
+    "fft_1d",
 ]
