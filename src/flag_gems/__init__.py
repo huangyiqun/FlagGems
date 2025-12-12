@@ -53,7 +53,7 @@ def enable(
             ("_weight_norm_interface", weight_norm_interface),
             ("_weight_norm_interface_backward", weight_norm_interface_backward),
             ("moe_sum", moe_sum),
-            ("fft_1d", fft_1d),
+            # ("fft", fft_1d),
             ("abs", abs),
             ("abs_", abs_),
             ("add.Tensor", add),
