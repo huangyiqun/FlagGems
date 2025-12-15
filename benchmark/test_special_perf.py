@@ -636,9 +636,13 @@ def test_perf_moe_align_block_size():
 def test_perf_fft_1d():
     def fft_1d_input_fn(shape, dtype, device):
         N = 1 << (shape[0] - 1).bit_length()
-        
-        input_tensor = torch.randn((N,), device='cuda') + torch.randn((N,), device='cuda') * 1j
-        output_tensor = torch.empty((N,), device='cuda') + torch.empty((N,), device='cuda') * 1j
+
+        input_tensor = (
+            torch.randn((N,), device="cuda") + torch.randn((N,), device="cuda") * 1j
+        )
+        output_tensor = (
+            torch.empty((N,), device="cuda") + torch.empty((N,), device="cuda") * 1j
+        )
         yield input_tensor, output_tensor
 
     def torch_op(input_tensor, output_tensor):
