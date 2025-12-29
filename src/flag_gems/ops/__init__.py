@@ -237,7 +237,6 @@ from flag_gems.ops.zeros_like import zeros_like
 __all__ = [
     "_conv_depthwise2d",
     "_unique2",
-    "unique_consecutive",
     "_upsample_bicubic2d_aa",
     "abs",
     "abs_",
@@ -505,6 +504,7 @@ __all__ = [
     "true_divide_out",
     "true_divide_",
     "uniform_",
+    "unique_consecutive",
     "upsample_nearest2d",
     "var_mean",
     "vdot",

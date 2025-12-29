@@ -446,9 +446,11 @@ def test_accuracy_unique(shape, dtype, sorted, return_inverse, return_counts):
 
 
 UNIQUE_CONSECUTIVE_SHAPE = [
-    # (1024, 65536),
-    # (10000, 65536),
-    (4096, 4096),
+    (20, 320, 15),
+    (1024, 1024, 1024),
+    (4096, 4096, 4096),
+    (16, 128, 64, 1280),
+    (16, 7, 57, 32, 29),
 ]
 
 
@@ -457,7 +459,7 @@ UNIQUE_CONSECUTIVE_SHAPE = [
 @pytest.mark.parametrize("dtype", INT_DTYPES + FLOAT_DTYPES)
 @pytest.mark.parametrize("return_inverse", [True, False])
 @pytest.mark.parametrize("return_counts", [True, False])
-@pytest.mark.parametrize("dim", [None, 0])
+@pytest.mark.parametrize("dim", [None, 0, 1, 2])
 def test_accuracy_unique_consecutive(shape, dtype, return_inverse, return_counts, dim):
     if dtype in FLOAT_DTYPES:
         flat_size = torch.tensor(shape).prod().item()
@@ -491,8 +493,9 @@ def test_accuracy_unique_consecutive(shape, dtype, return_inverse, return_counts
                 return_counts=return_counts,
                 dim=dim,
             )
-            # assert res_output.numel() == ref_output.numel()
             gems_assert_equal(res_inverse_indices, ref_inverse_indices)
+            gems_assert_equal(res_counts, ref_counts)
+            gems_assert_equal(res_output, ref_output)
         else:
             with flag_gems.use_gems():
                 res_output, res_counts = torch.unique_consecutive(
@@ -507,8 +510,8 @@ def test_accuracy_unique_consecutive(shape, dtype, return_inverse, return_counts
                 return_counts=return_counts,
                 dim=dim,
             )
-            # assert res_output.numel() == ref_output.numel()
-        gems_assert_equal(res_counts, ref_counts)
+            gems_assert_equal(res_counts, ref_counts)
+            gems_assert_equal(res_output, ref_output)
     else:
         if return_inverse:
             with flag_gems.use_gems():
@@ -524,8 +527,8 @@ def test_accuracy_unique_consecutive(shape, dtype, return_inverse, return_counts
                 return_counts=return_counts,
                 dim=dim,
             )
-            # assert res_output.numel() == ref_output.numel()
             gems_assert_equal(res_inverse_indices, ref_inverse_indices)
+            gems_assert_equal(res_output, ref_output)
         else:
             with flag_gems.use_gems():
                 res_output = torch.unique_consecutive(
@@ -540,9 +543,7 @@ def test_accuracy_unique_consecutive(shape, dtype, return_inverse, return_counts
                 return_counts=return_counts,
                 dim=dim,
             )
-            # assert res_output.numel() == ref_output.numel()
-
-    gems_assert_equal(res_output, ref_output)
+            gems_assert_equal(res_output, ref_output)
 
 
 @pytest.mark.multinomial
