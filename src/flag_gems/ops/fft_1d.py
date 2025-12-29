@@ -46,7 +46,7 @@ def fft_stage_kernel(real_ptr, imag_ptr, n, stage):
     pos_in_group = tid % half_block
 
     # compute the index of two elements in butterfly pair
-    first_idx = butterfly_group << stage + pos_in_group
+    first_idx = butterfly_group * half_block * 2 + pos_in_group
     second_idx = first_idx + half_block
 
     if second_idx >= n:
