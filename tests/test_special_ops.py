@@ -1460,7 +1460,6 @@ def test_accuracy_moe_align_block_size(
 
 @pytest.mark.fft_1d
 @pytest.mark.parametrize("N", [4, 8, 16, 32, 128, 256, 512])
-# @pytest.mark.parametrize("N", [2**d for d in range(2, 10, 1)])
 def test_fft_1d(N):
     # FlagGems
     input = torch.randn((N,), device="cuda") + torch.randn((N,), device="cuda") * 1j
