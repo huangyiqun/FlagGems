@@ -197,7 +197,7 @@ from flag_gems.ops.sigmoid import sigmoid, sigmoid_, sigmoid_backward
 from flag_gems.ops.silu import silu, silu_, silu_backward
 from flag_gems.ops.sin import sin, sin_
 from flag_gems.ops.slice_scatter import slice_scatter
-from flag_gems.ops.softmax import softmax, softmax_backward
+from flag_gems.ops.softmax import softmax, softmax_backward, softmax_int, softmax_int_out, softmax_Dimname
 from flag_gems.ops.softplus import softplus
 from flag_gems.ops.sort import sort, sort_stable
 from flag_gems.ops.sqrt import sqrt, sqrt_
@@ -480,6 +480,9 @@ __all__ = [
     "slice_scatter",
     "softmax",
     "softmax_backward",
+    "softmax_int",
+    "softmax_int_out",
+    "softmax_Dimname",
     "sort",
     "sort_stable",
     "stack",

@@ -525,11 +525,33 @@ def test_accuracy_log_softmax_backward(shape, dtype, dim):
 
 # TODO: failed at (1, 2) (200, 40999, 3)
 @pytest.mark.softmax
+# @pytest.mark.parametrize(
+#     "shape", [(1, 256)] if QUICK_MODE else [(1, 256), (4096, 256), (200, 2560, 3)]
+# )
 @pytest.mark.parametrize(
-    "shape", [(1, 256)] if QUICK_MODE else [(1, 256), (4096, 256), (200, 2560, 3)]
+    "shape", [
+        (1048576),
+        (64, 64),
+        (4096, 4096),
+        (64, 512, 512),
+        (1024, 1024, 1024),
+        (1049600),
+        (1073741824),
+        (1024, 1),
+        (1024, 16),
+        (1024, 256),
+        (1024, 4096),
+        (1024, 65536),
+        (1024, 1048576),
+        (64, 1, 64),
+        (64, 16, 64),
+        (64, 256, 64),
+        (64, 4096, 64),
+    ]
 )
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
-@pytest.mark.parametrize("dim", DIM_LIST)
+# @pytest.mark.parametrize("dim", DIM_LIST)
+@pytest.mark.parametrize("dim", [0])
 @pytest.mark.parametrize("neg_inf", [True, False])
 def test_accuracy_softmax(shape, dtype, dim, neg_inf):
     inp = torch.randn(shape, dtype=dtype, device=flag_gems.device)

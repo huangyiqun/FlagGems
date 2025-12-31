@@ -280,8 +280,228 @@ def softmax_backward_kernel_inner(
             offsets += TILE_N
 
 
+# -------------------------- op generate --------------------------
+@triton.jit
+def _softmax_kernel(
+    x_ptr, out_ptr,
+    # input sizes (unused in kernel, kept for symmetry/extension)
+    s0, s1, s2, s3, s4, s5, s6, s7,
+    # input strides (elements)
+    is0, is1, is2, is3, is4, is5, is6, is7,
+    # output strides (elements)
+    os0, os1, os2, os3, os4, os5, os6, os7,
+    # collapsed row products (elements)
+    cp0, cp1, cp2, cp3, cp4, cp5, cp6, cp7,
+    ndims, dim, K, stride_k_in, stride_k_out,
+    BLOCK_K: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)  # row id in the collapsed view
+    rid = pid.to(tl.int64)
+
+    # Compute base offsets for this row for input and output
+    base_in = tl.zeros([1], dtype=tl.int64)
+    base_out = tl.zeros([1], dtype=tl.int64)
+    base = rid
+
+    # Unravel 'rid' into multi-index over dims != dim, and build input/output offsets
+    for d in tl.static_range(0, 8):
+        # select per-d scalars
+        if d == 0:
+            cp = cp0; istr = is0; ostr = os0
+        elif d == 1:
+            cp = cp1; istr = is1; ostr = os1
+        elif d == 2:
+            cp = cp2; istr = is2; ostr = os2
+        elif d == 3:
+            cp = cp3; istr = is3; ostr = os3
+        elif d == 4:
+            cp = cp4; istr = is4; ostr = os4
+        elif d == 5:
+            cp = cp5; istr = is5; ostr = os5
+        elif d == 6:
+            cp = cp6; istr = is6; ostr = os6
+        else:
+            cp = cp7; istr = is7; ostr = os7
+
+        # masks for valid dimension and not the reduction dim
+        m_valid = tl.where(ndims > d, 1, 0)
+        m_proc = m_valid * tl.where(dim != d, 1, 0)
+
+        # Compute index for this dimension
+        # Ensure cp >= 1 to avoid div by zero, cp is provided as 1 for invalid dims.
+        idx_d = (base // cp) * m_proc
+        base = base - idx_d * cp
+
+        base_in += (idx_d.to(tl.int64) * istr)
+        base_out += (idx_d.to(tl.int64) * ostr)
+
+    # Vector of K indices for this row
+    offs = tl.arange(0, BLOCK_K)
+    mask = offs < K
+
+    # Compute row-wise max in float32 for numerical stability
+    x_ptrs = x_ptr + base_in + offs.to(tl.int64) * stride_k_in
+    x_vals = tl.load(x_ptrs, mask=mask, other=-float('inf'))
+    x_vals_f32 = x_vals.to(tl.float32)
+    row_max = tl.max(x_vals_f32, axis=0)
+
+    # Compute denominator: sum(exp(x - max))
+    x_vals2 = tl.load(x_ptrs, mask=mask, other=-float('inf')).to(tl.float32)
+    num = tl.exp(x_vals2 - row_max)
+    denom = tl.sum(num, axis=0)
+
+    # Compute softmax and store
+    y = num / denom
+    out_ptrs = out_ptr + base_out + offs.to(tl.int64) * stride_k_out
+    tl.store(out_ptrs, y.to(OUT_DTYPE), mask=mask)
+
+
+def _torch_dtype_to_tl_dtype(dtype: torch.dtype):
+    if dtype == torch.float16:
+        return tl.float16
+    if dtype == torch.bfloat16:
+        return tl.bfloat16
+    if dtype == torch.float32:
+        return tl.float32
+    if dtype == torch.float64:
+        return tl.float64
+    raise ValueError(f"Unsupported output dtype for softmax: {dtype}")
+
+
+def _normalize_dim(dim: int, ndims: int) -> int:
+    if dim < 0:
+        dim += ndims
+    if not (0 <= dim < ndims):
+        raise IndexError(f"dim {dim} out of range for tensor with {ndims} dims")
+    return dim
+
+
+def _infer_out_dtype(x: torch.Tensor, dtype: torch.dtype | None) -> torch.dtype:
+    if dtype is not None:
+        return dtype
+    # Follow PyTorch convention: if input is floating, keep dtype, else promote to float32
+    if x.dtype.is_floating_point:
+        return x.dtype
+    return torch.float32
+
+
+def _prepare_meta(t: torch.Tensor, dim: int):
+    shape = t.shape
+    ndims = len(shape)
+    if ndims > 8:
+        raise NotImplementedError("softmax Triton kernel supports up to 8 dimensions")
+    dim = _normalize_dim(dim, ndims)
+
+    sizes = list(shape)
+    in_strides = list(t.stride())  # in elements
+    # Collapsed row products cp[d] = product of sizes[j] for j > d and j != dim
+    cp = [1] * ndims
+    for d in range(ndims):
+        p = 1
+        for j in range(d + 1, ndims):
+            if j == dim:
+                continue
+            p *= sizes[j]
+        cp[d] = max(p, 1)
+    # Pad to 8
+    def pad_list(lst, val, n=8):
+        return lst + [val] * (n - len(lst))
+    sizes = pad_list(sizes, 1)
+    in_strides = pad_list(in_strides, 0)
+    cp = pad_list(cp, 1)
+
+    K = sizes[dim]
+    stride_k_in = in_strides[dim]
+
+    return dim, ndims, sizes, in_strides, cp, K, stride_k_in
+
+
+def _launch_softmax(x: torch.Tensor, out: torch.Tensor, dim: int):
+    assert x.is_cuda and out.is_cuda, "Tensors must be on CUDA device"
+    assert x.shape == out.shape, "Input and output must have the same shape"
+    # Meta for input
+    dim, ndims, sizes, in_strides, cp, K, stride_k_in = _prepare_meta(x, dim)
+    # Meta for output strides
+    out_strides = list(out.stride())
+    out_strides = out_strides + [0] * (8 - len(out_strides))
+    stride_k_out = out_strides[dim]
+
+    # Choose BLOCK_K = next power of two of K (cap at 4096)
+    if K <= 0:
+        return out
+    bk = 1 << (K - 1).bit_length()
+    BLOCK_K = min(bk, 4096)
+    # num_warps heuristic
+    num_warps = 4 if BLOCK_K <= 1024 else 8
+
+    # Triton dtype for output
+    tl_out_dtype = _torch_dtype_to_tl_dtype(out.dtype)
+
+    # Number of rows M = product of sizes excluding dim
+    M = 1
+    for i, s in enumerate(sizes[:len(out.shape)]):
+        if i == dim:
+            continue
+        M *= s
+
+    grid = (M,)
+
+    _softmax_kernel[grid](
+        x, out,
+        sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], sizes[5], sizes[6], sizes[7],
+        in_strides[0], in_strides[1], in_strides[2], in_strides[3],
+        in_strides[4], in_strides[5], in_strides[6], in_strides[7],
+        out_strides[0], out_strides[1], out_strides[2], out_strides[3],
+        out_strides[4], out_strides[5], out_strides[6], out_strides[7],
+        cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], cp[6], cp[7],
+        ndims, dim, K, stride_k_in, stride_k_out,
+        BLOCK_K=BLOCK_K,
+        OUT_DTYPE=tl_out_dtype,
+        num_warps=num_warps,
+    )
+    return out
+
+
+def softmax_int(self: torch.Tensor, dim: int, dtype: torch.dtype | None = None) -> torch.Tensor:
+    # print("这就是 softmax_int")
+    out_dtype = _infer_out_dtype(self, dtype)
+    out = torch.empty_like(self, dtype=out_dtype, device=self.device)
+    return _launch_softmax(self, out, dim)
+
+
+def softmax_Dimname(self: torch.Tensor, dim: str, *, dtype: torch.dtype | None = None) -> torch.Tensor:
+    print("这就是 softmax_Dimname")
+    # Resolve named dim to index if available
+    if not hasattr(self, 'names') or self.names is None:
+        raise RuntimeError("Tensor has no names; cannot resolve Dimname")
+    try:
+        dim_index = self.names.index(dim)  # type: ignore[attr-defined]
+    except Exception as e:
+        raise RuntimeError(f"Invalid dimension name: {dim}") from e
+    out_dtype = _infer_out_dtype(self, dtype)
+    out = torch.empty_like(self, dtype=out_dtype, device=self.device)
+    return _launch_softmax(self, out, dim_index)
+
+
+def softmax_int_out(self: torch.Tensor, dim: int, dtype: torch.dtype | None = None, *, out: torch.Tensor | None = None) -> torch.Tensor:
+    print("这就是 softmax_int_out")
+    out_dtype = _infer_out_dtype(self, dtype)
+    if out is None:
+        out = torch.empty_like(self, dtype=out_dtype, device=self.device)
+    else:
+        if out.device != self.device:
+            raise RuntimeError("out must be on the same device as input")
+        if out.shape != self.shape:
+            raise RuntimeError("out shape must match input shape")
+        if out.dtype != out_dtype:
+            raise RuntimeError(f"out dtype {out.dtype} does not match expected {out_dtype}")
+    return _launch_softmax(self, out, dim)
+
+
 def softmax(self, dim, half_to_float=False):
     logger.debug("GEMS SOFTMAX")
+    print("这就是 原始的 softmax")
 
     assert dim >= -self.ndim and dim < self.ndim, "Invalid dim"
     dim = dim % self.ndim

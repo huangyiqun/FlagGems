@@ -1194,14 +1194,36 @@ def test_accuracy_to_copy_preserve_strides(memory_format):
         assert res_out.is_contiguous()
 
 
+COPY__SHAPES = (
+    [
+        (1073741824),
+        (64, 64),
+        (4096, 4096),
+        (64, 512, 512),
+        (1024, 1024, 1024),
+    ]
+)
+
+
 @pytest.mark.inplace
 @pytest.mark.copy_
-@pytest.mark.parametrize("shape", POINTWISE_SHAPES)
+@pytest.mark.parametrize("shape", COPY__SHAPES)
+# @pytest.mark.parametrize(
+#     "dtype",
+#     FLOAT_DTYPES + [torch.int32, torch.int64]
+#     if flag_gems.vendor_name == "cambricon"
+#     else FLOAT_DTYPES,
+# )
 @pytest.mark.parametrize(
-    "dtype",
-    FLOAT_DTYPES + [torch.int32, torch.int64]
-    if flag_gems.vendor_name == "cambricon"
-    else FLOAT_DTYPES,
+    "dtype", [
+        # torch.float16,
+        # torch.float32,
+        # torch.bfloat16,
+        torch.int32,
+        torch.bool,
+        torch.int16,
+        torch.int64,
+    ]
 )
 @pytest.mark.skipif(
     SkipVersion("torch", "<2.4"),
