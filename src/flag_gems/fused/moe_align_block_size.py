@@ -42,13 +42,8 @@ def moe_align_block_size_stage1(
     num_experts: tl.constexpr,
     numel,
     tokens_per_thread,
-<<<<<<< HEAD
     sorted_token_ids_ptr,
     expert_ids_ptr,
-=======
-    sorted_token_ids_ptr, # output
-    expert_ids_ptr, # output
->>>>>>> bfc3461 (update)
     numel_sorted_token_ids: tl.constexpr,
     numel_expert_ids: tl.constexpr,
     block_size_sorted: tl.constexpr,
@@ -57,18 +52,11 @@ def moe_align_block_size_stage1(
     pid = tl.program_id(0)
 
     offsets_sorted = pid * block_size_sorted + tl.arange(0, block_size_sorted)
-<<<<<<< HEAD
     mask_sorted = offsets_sorted < numel_sorted_token_ids
     tl.store(sorted_token_ids_ptr + offsets_sorted, numel, mask=mask_sorted)
 
     offsets_expert = pid * block_size_expert + tl.arange(0, block_size_expert)
     mask_expert = offsets_expert < numel_expert_ids
-=======
-    offsets_expert = pid * block_size_expert + tl.arange(0, block_size_expert)
-    mask_sorted = offsets_sorted < numel_sorted_token_ids
-    mask_expert = offsets_expert < numel_expert_ids
-    tl.store(sorted_token_ids_ptr + offsets_sorted, numel, mask=mask_sorted)
->>>>>>> bfc3461 (update)
     tl.store(expert_ids_ptr + offsets_expert, 0, mask=mask_expert)
 
     start_idx = pid * tokens_per_thread
@@ -174,7 +162,6 @@ def moe_align_block_size_stage4(
     rank_post_pad = token_idx_in_expert + tl.load(cumsum_ptr + expert_id, mask=mask)
     tl.store(sorted_token_ids_ptr + rank_post_pad, offset, mask=mask)
 
-# 这是一个使用triton编写的单kernel moe_align_bloc_size算子，请根据你刚才学到的gluon，将这个kernel改为使用gluon实现，不要改接口，也不要改调用方式
 
 @gluon.jit(do_not_specialize=["numel", "tokens_per_thread"])
 def moe_align_block_size_kernel(
@@ -224,7 +211,8 @@ def moe_align_block_size_kernel(
                 token_cnt_0 = gl.load(tokens_cnts_ptr + off_c + idx)
                 gl.store(tokens_cnts_ptr + off_c + idx, token_cnt_0 + 1)
 
-    # stage 2 # --------------------------------------------------------------------------
+    # stage 2
+    # sync # --------------------------------------------------------------------------
     sync_offset = gl.arange(0, 1, layout=None)
     cp.async_copy_global_to_shared(sync_point, sync_point_ptr + sync_offset)
     cp.commit_group()
@@ -241,7 +229,8 @@ def moe_align_block_size_kernel(
                 last_cnt = last_cnt + token_cnt_1
                 gl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
 
-    # stage 3 # --------------------------------------------------------------------------
+    # stage 3
+    # sync # --------------------------------------------------------------------------
     cp.async_copy_global_to_shared(sync_point, sync_point_ptr + sync_offset)
     cp.commit_group()
     cp.wait_group(0)
@@ -259,7 +248,8 @@ def moe_align_block_size_kernel(
                 gl.store(cumsum_ptr + i, last_cumsum)
             gl.store(total_tokens_post_pad_ptr, last_cumsum)
 
-    # stage 4 # --------------------------------------------------------------------------
+    # stage 4
+    # sync # --------------------------------------------------------------------------
     cp.async_copy_global_to_shared(sync_point, sync_point_ptr + sync_offset)
     cp.commit_group()
     cp.wait_group(0)
@@ -315,64 +305,61 @@ def moe_align_block_size_triton(
     )
     block_size_expert = triton.next_power_of_2(ceil_div(numel_expert_ids, num_experts))
 
+    numel_sorted_token_ids = expert_ids.numel()
+    numel_expert_ids = expert_ids.numel()
+
     block_size_sorted = next_power_of_2(ceil_div(numel, num_experts))
     block_size_expert = next_power_of_2(ceil_div(numel_expert_ids, num_experts))\
 
     sync_point = torch.zeros((1,), dtype=torch.int32, device=topk_ids.device)
 
-    # moe_align_block_size_kernel[grid](
-    #     topk_ids,
-    #     tokens_cnts,
-    #     num_experts,
-    #     numel,
-    #     numel_sorted_token_ids,
-    #     numel_expert_ids,
-    #     block_size_sorted,
-    #     block_size_expert,
-    #     tokens_per_thread,
-    #     cumsum,
-    #     block_size,
-    #     sorted_token_ids,
-    #     expert_ids,
-    #     num_tokens_post_pad,
-    #     sync_point,
-    # )
-
-    moe_align_block_size_stage1[grid](
+    moe_align_block_size_kernel[grid](
         topk_ids,
         tokens_cnts,
         num_experts,
         numel,
-        tokens_per_thread,
-        sorted_token_ids,
-        expert_ids,
         numel_sorted_token_ids,
         numel_expert_ids,
         block_size_sorted,
         block_size_expert,
-    )
-    moe_align_block_size_stage2[grid](
-        tokens_cnts,
-        num_experts,
-    )
-    moe_align_block_size_stage3[(1,)](
-        num_tokens_post_pad,
-        tokens_cnts,
+        tokens_per_thread,
         cumsum,
-        num_experts,
         block_size,
-    )
-    moe_align_block_size_stage4[grid](
-        topk_ids,
         sorted_token_ids,
         expert_ids,
-        tokens_cnts,
-        cumsum,
-        num_experts,
-        block_size,
-        numel,
-        tokens_per_thread,
+        num_tokens_post_pad,
+        sync_point,
     )
+
+    # moe_align_block_size_stage1[grid](
+    #     topk_ids,
+    #     tokens_cnts,
+    #     num_experts,
+    #     numel,
+    #     tokens_per_thread,
+    # )
+    # moe_align_block_size_stage2[grid](
+    #     tokens_cnts,
+    #     num_experts,
+    # )
+    # moe_align_block_size_stage3[(1,)](
+    #     num_tokens_post_pad,
+    #     tokens_cnts,
+    #     cumsum,
+    #     num_experts,
+    #     block_size,
+    # )
+    # moe_align_block_size_stage4[grid](
+    #     topk_ids,
+    #     sorted_token_ids,
+    #     expert_ids,
+    #     tokens_cnts,
+    #     cumsum,
+    #     num_experts,
+    #     block_size,
+    #     numel,
+    #     tokens_per_thread,
+    # )
 
 
 def moe_align_block_size(
@@ -408,5 +395,3 @@ def moe_align_block_size(
         expert_ids = expert_map[expert_ids]
 
     return sorted_ids, expert_ids, num_tokens_post_pad
-
-
