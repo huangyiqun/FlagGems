@@ -4,19 +4,19 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
-from triton.language.core import _aggregate as aggregate
-from triton.language.core import constexpr
-from triton.experimental.gluon.language.nvidia.hopper import (
-    tma,
-    mbarrier,
-    fence_async_shared,
-)
-from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
+# # ---------------------- experimental ----------------------
+# from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
+# from triton.experimental.gluon.language.nvidia.hopper import (
+#     fence_async_shared,
+#     tma,
+#     mbarrier,
+# )
+# from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
+# from triton.language.core import _aggregate as aggregate
+# from triton.language.core import constexpr
 
 logger = logging.getLogger(__name__)
 
@@ -179,27 +179,38 @@ def moe_align_block_size_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     total_tokens_post_pad_ptr,
-    sync_point_ptr,
 ):
     pid = gl.program_id(0)
 
-    # allocate shared memory
-    tokens_cnts_shared = gl.allocate_shared_memory(gl.int32, [num_experts, num_experts], mbarrier.MBarrierLayout())
-    sync_point = gl.allocate_shared_memory(gl.int32, [1,], mbarrier.MBarrierLayout())
+    # # allocate shared memory
+    # tokens_cnts_shared = gl.allocate_shared_memory(
+    #     gl.int32, [num_experts + 1, num_experts], mbarrier.MBarrierLayout()
+    # )
 
-
+    # shared_layout: gl.constexpr = gl.DistributedLinearLayout(
+    #     reg_bases=[],
+    #     lane_bases=[[1], [2], [4], [8], [16]],
+    #     warp_bases=[[32], [64]],
+    #     block_bases=[],
+    #     shape=[128],
+    # )
 
     # stage 1 # --------------------------------------------------------------------------
-
     if True:
         # init load_layout
-        load_layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+        load_layout: gl.constexpr = gl.BlockedLayout(
+            [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+        )
         # fill sorted_token_ids_ptr
-        offsets_sorted = pid * block_size_sorted + gl.arange(0, block_size_sorted, layout=gl.SliceLayout(1, load_layout))
+        offsets_sorted = pid * block_size_sorted + gl.arange(
+            0, block_size_sorted, layout=gl.SliceLayout(1, load_layout)
+        )
         mask_sorted = offsets_sorted < numel_sorted_token_ids
         gl.store(sorted_token_ids_ptr + offsets_sorted, numel, mask=mask_sorted)
         # fill expert_ids_ptr
-        offsets_expert = pid * block_size_expert + gl.arange(0, block_size_expert, layout=gl.SliceLayout(1, load_layout))
+        offsets_expert = pid * block_size_expert + gl.arange(
+            0, block_size_expert, layout=gl.SliceLayout(1, load_layout)
+        )
         mask_expert = offsets_expert < numel_expert_ids
         gl.store(expert_ids_ptr + offsets_expert, 0, mask=mask_expert)
 
@@ -211,72 +222,72 @@ def moe_align_block_size_kernel(
                 token_cnt_0 = gl.load(tokens_cnts_ptr + off_c + idx)
                 gl.store(tokens_cnts_ptr + off_c + idx, token_cnt_0 + 1)
 
+                # # ---------------------- experimental ----------------------
+                # idx = gl.load(topk_ids_ptr + start_idx_0 + i)
+                # token_cnt_0 = tokens_cnts_shared.index(off_c + idx).load(shared_layout)
+                # gl.store(tokens_cnts_ptr + off_c + idx, 1)
+
     # stage 2
     # sync # --------------------------------------------------------------------------
-    sync_offset = gl.arange(0, 1, layout=None)
-    cp.async_copy_global_to_shared(sync_point, sync_point_ptr + sync_offset)
-    cp.commit_group()
-    cp.wait_group(0)
-
-    stage1 = True
     if True:
-        while stage1:
-            stage1 = False
+        last_cnt = 0
+        for i in range(1, num_experts + 1):
+            token_cnt_1 = gl.load(tokens_cnts_ptr + i * num_experts + pid)
+            last_cnt = last_cnt + token_cnt_1
+            gl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
 
-            last_cnt = 0
-            for i in range(1, num_experts + 1):
-                token_cnt_1 = gl.load(tokens_cnts_ptr + i * num_experts + pid)
-                last_cnt = last_cnt + token_cnt_1
-                gl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
+            # # ---------------------- experimental ----------------------
+            # token_cnt_1 = tokens_cnts_shared.index(i * num_experts + pid).load(
+            #     shared_layout
+            # )
+            # last_cnt = last_cnt + 1
+            # gl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
 
     # stage 3
     # sync # --------------------------------------------------------------------------
-    cp.async_copy_global_to_shared(sync_point, sync_point_ptr + sync_offset)
-    cp.commit_group()
-    cp.wait_group(0)
-
-    stage2 = True
     if True:
-        while stage2:
-            stage2 = False
+        last_cumsum = 0
+        off_cnt = num_experts * num_experts
+        for i in range(1, num_experts + 1):
+            token_cnt_2 = gl.load(tokens_cnts_ptr + off_cnt + i - 1)
+            last_cumsum = last_cumsum + gl.cdiv(token_cnt_2, block_size) * block_size
+            gl.store(cumsum_ptr + i, last_cumsum)
+        gl.store(total_tokens_post_pad_ptr, last_cumsum)
 
-            last_cumsum = 0
-            off_cnt = num_experts * num_experts
-            for i in range(1, num_experts + 1):
-                token_cnt_2 = gl.load(tokens_cnts_ptr + off_cnt + i - 1)
-                last_cumsum = last_cumsum + gl.cdiv(token_cnt_2, block_size) * block_size
-                gl.store(cumsum_ptr + i, last_cumsum)
-            gl.store(total_tokens_post_pad_ptr, last_cumsum)
+        # # ---------------------- experimental ----------------------
+        # for i in range(1, num_experts + 1):
+        #     token_cnt_2 = tokens_cnts_shared.index(off_cnt + i - 1).load(shared_layout)
+        #     last_cumsum = last_cumsum + gl.cdiv(1, block_size) * block_size
+        #     gl.store(cumsum_ptr + i, last_cumsum)
+        # gl.store(total_tokens_post_pad_ptr, last_cumsum)
 
     # stage 4
     # sync # --------------------------------------------------------------------------
-    cp.async_copy_global_to_shared(sync_point, sync_point_ptr + sync_offset)
-    cp.commit_group()
-    cp.wait_group(0)
-
-    stage3 = True
     if True:
-        while stage3:
-            stage3 = False
+        start_idx_1 = gl.load(cumsum_ptr + pid)
+        end_idx = gl.load(cumsum_ptr + pid + 1)
 
-            start_idx_1 = gl.load(cumsum_ptr + pid)
-            end_idx = gl.load(cumsum_ptr + pid + 1)
+        for i in range(start_idx_1, end_idx, block_size):
+            gl.store(expert_ids_ptr + i // block_size, pid)
 
-            for i in range(start_idx_1, end_idx, block_size):
-                gl.store(expert_ids_ptr + i // block_size, pid)
+        start_idx_1 = pid * tokens_per_thread
+        off_t = pid * num_experts
+        for i in range(start_idx_1, gl.minimum(start_idx_1 + tokens_per_thread, numel)):
+            expert_id = gl.load(topk_ids_ptr + i)
+            token_cnt_3 = gl.load(tokens_cnts_ptr + off_t + expert_id)
+            rank_post_pad = token_cnt_3 + gl.load(cumsum_ptr + expert_id)
+            gl.store(sorted_token_ids_ptr + rank_post_pad, i)
+            gl.store(tokens_cnts_ptr + off_t + expert_id, token_cnt_3 + 1)
 
-            start_idx_1 = pid * tokens_per_thread
-            off_t = pid * num_experts
-            for i in range(start_idx_1, gl.minimum(start_idx_1 + tokens_per_thread, numel)):
-                expert_id = gl.load(topk_ids_ptr + i)
-                token_cnt_3 = gl.load(tokens_cnts_ptr + off_t + expert_id)
-                rank_post_pad = token_cnt_3 + gl.load(cumsum_ptr + expert_id)
-                gl.store(sorted_token_ids_ptr + rank_post_pad, i)
-                gl.store(tokens_cnts_ptr + off_t + expert_id, token_cnt_3 + 1)
-
-
-
-
+        # # ---------------------- experimental ----------------------
+        # for i in range(start_idx_1, gl.minimum(start_idx_1 + tokens_per_thread, numel)):
+        #     expert_id = gl.load(topk_ids_ptr + i)
+        #     token_cnt_3 = tokens_cnts_shared.index(off_t + expert_id).load(
+        #         shared_layout
+        #     )
+        #     rank_post_pad = 1 + gl.load(cumsum_ptr + expert_id)
+        #     gl.store(sorted_token_ids_ptr + rank_post_pad, i)
+        #     gl.store(tokens_cnts_ptr + off_t + expert_id, 1)
 
 
 def moe_align_block_size_triton(
@@ -292,6 +303,11 @@ def moe_align_block_size_triton(
     numel_expert_ids = expert_ids.numel()
     # The tensor needs to be padded before calculating IDs,
     # to prevent out-of-bounds address access.
+<<<<<<< HEAD
+=======
+    # sorted_token_ids.fill_(numel)
+    # expert_ids.fill_(0)
+>>>>>>> b7597ef (update)
 
     grid = (num_experts,)
     tokens_cnts = torch.zeros(
@@ -309,9 +325,7 @@ def moe_align_block_size_triton(
     numel_expert_ids = expert_ids.numel()
 
     block_size_sorted = next_power_of_2(ceil_div(numel, num_experts))
-    block_size_expert = next_power_of_2(ceil_div(numel_expert_ids, num_experts))\
-
-    sync_point = torch.zeros((1,), dtype=torch.int32, device=topk_ids.device)
+    block_size_expert = next_power_of_2(ceil_div(numel_expert_ids, num_experts))
 
     moe_align_block_size_kernel[grid](
         topk_ids,
@@ -328,7 +342,6 @@ def moe_align_block_size_triton(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_pad,
-        sync_point,
     )
 
     # moe_align_block_size_stage1[grid](
