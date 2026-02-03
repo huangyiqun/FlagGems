@@ -302,6 +302,151 @@ def moe_align_block_size_kernel(
             #     gl.store(tokens_cnts_ptr + off_t + expert_id, 1)
 
 
+
+# @triton.jit(do_not_specialize=["numel", "total_elems"])
+# def moe_align_block_size_vllm_stage1_kernel(
+#     topk_ids_ptr,
+#     sorted_token_ids_ptr,
+#     cumsum_ptr,
+#     expert_ids_ptr,
+#     num_tokens_post_pad_ptr,
+#     num_experts: tl.constexpr,
+#     numel,
+#     total_elems,
+#     BLOCK: tl.constexpr,
+#     NUM_BLOCKS: tl.constexpr,
+#     NUM_SORT_BLOCKS: tl.constexpr,
+#     NUM_BLOCKS_OUT: tl.constexpr,
+#     BLOCK_SIZE: tl.constexpr,
+#     BLOCK_OUT: tl.constexpr,
+#     BLOCK_EXPERT: tl.constexpr,
+#     BLOCK_EXPERT_GROUP: tl.constexpr,
+# ):
+#     pid = tl.program_id(0)
+#     if pid == 1:
+#         for i in range(NUM_SORT_BLOCKS):
+#             base = i * BLOCK
+#             offsets = base + tl.arange(0, BLOCK)
+#             mask = offsets < total_elems
+#             tl.store(sorted_token_ids_ptr + offsets, numel, mask=mask)
+#         return
+
+#     expert_offsets = tl.arange(0, BLOCK_EXPERT)
+#     expert_mask = expert_offsets < num_experts
+
+#     counts = tl.zeros((BLOCK_EXPERT,), tl.int32)
+#     for i in range(NUM_BLOCKS):
+#         base = i * BLOCK
+#         offsets = base + tl.arange(0, BLOCK)
+#         mask = offsets < numel
+#         expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+#         valid = mask & (expert_id < num_experts)
+#         expert_id = tl.where(valid, expert_id, 0)
+#         counts += tl.histogram(expert_id, BLOCK_EXPERT, mask=valid)
+
+#     counts = tl.where(expert_mask, counts, 0)
+#     aligned = tl.cdiv(counts, BLOCK_SIZE) * BLOCK_SIZE
+#     cumsum = tl.cumsum(aligned, axis=0)
+#     tl.store(cumsum_ptr + 0, 0)
+#     tl.store(cumsum_ptr + 1 + expert_offsets, cumsum, mask=expert_mask)
+#     total = tl.sum(aligned, axis=0)
+#     tl.store(num_tokens_post_pad_ptr, total)
+
+#     for expert_base in range(0, BLOCK_EXPERT, BLOCK_EXPERT_GROUP):
+#         group_offsets = expert_base + tl.arange(0, BLOCK_EXPERT_GROUP)
+#         group_mask = group_offsets < num_experts
+#         start = tl.load(cumsum_ptr + group_offsets, mask=group_mask, other=0)
+#         end = tl.load(cumsum_ptr + group_offsets + 1, mask=group_mask, other=0)
+#         start_block = start // BLOCK_SIZE
+#         end_block = end // BLOCK_SIZE
+#         for base_block in range(0, NUM_BLOCKS_OUT, BLOCK_OUT):
+#             block_ids = base_block + tl.arange(0, BLOCK_OUT)
+#             valid_block = block_ids < NUM_BLOCKS_OUT
+#             block_ids_2d = block_ids[None, :] + tl.zeros((BLOCK_EXPERT_GROUP, 1), tl.int32)
+#             expert_vals = group_offsets[:, None] + tl.zeros((1, BLOCK_OUT), tl.int32)
+#             mask = (
+#                 valid_block[None, :]
+#                 & group_mask[:, None]
+#                 & (block_ids_2d >= start_block[:, None])
+#                 & (block_ids_2d < end_block[:, None])
+#             )
+#             tl.store(expert_ids_ptr + block_ids_2d, expert_vals, mask=mask)
+
+
+# @triton.jit(do_not_specialize=["numel"])
+# def moe_align_block_size_sort_kernel(
+#     topk_ids_ptr,
+#     sorted_token_ids_ptr,
+#     cumsum_ptr,
+#     num_experts: tl.constexpr,
+#     numel,
+#     BLOCK: tl.constexpr,
+# ):
+#     pid = tl.program_id(0)
+#     offsets = pid * BLOCK + tl.arange(0, BLOCK)
+#     mask = offsets < numel
+#     expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0)
+#     valid = mask & (expert_id < num_experts)
+#     rank = tl.atomic_add(cumsum_ptr + expert_id, 1, mask=valid)
+#     tl.store(sorted_token_ids_ptr + rank, offsets, mask=valid)
+
+# def moe_align_block_size_triton(
+#     topk_ids: torch.Tensor,
+#     num_experts: int,
+#     block_size: int,
+#     sorted_token_ids: torch.Tensor,
+#     expert_ids: torch.Tensor,
+#     num_tokens_post_pad: torch.Tensor,
+# ) -> None:
+#     numel = topk_ids.numel()
+#     warp_size = 32
+#     cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
+
+#     expert_ids.fill_(0)
+
+#     block_expert = triton.cdiv(num_experts, warp_size) * warp_size
+#     block_warps = 8 if block_expert >= 64 else 4
+#     BLOCK_TOKENS = 1024
+#     total_elems = sorted_token_ids.numel()
+#     num_blocks = triton.cdiv(numel, BLOCK_TOKENS)
+#     num_sort_blocks = triton.cdiv(total_elems, BLOCK_TOKENS)
+#     num_blocks_out = triton.cdiv(total_elems, block_size)
+
+#     moe_align_block_size_vllm_stage1_kernel[(2,)](
+#         topk_ids,
+#         sorted_token_ids,
+#         cumsum,
+#         expert_ids,
+#         num_tokens_post_pad,
+#         num_experts,
+#         numel,
+#         total_elems,
+#         BLOCK=BLOCK_TOKENS,
+#         NUM_BLOCKS=num_blocks,
+#         NUM_SORT_BLOCKS=num_sort_blocks,
+#         NUM_BLOCKS_OUT=num_blocks_out,
+#         BLOCK_SIZE=block_size,
+#         BLOCK_OUT=128,
+#         BLOCK_EXPERT=block_expert,
+#         BLOCK_EXPERT_GROUP=128,
+#         num_warps=32,
+#         num_stages=1,
+#     )
+
+#     block_sort = 256
+#     grid = (triton.cdiv(numel, block_sort),)
+#     moe_align_block_size_sort_kernel[grid](
+#         topk_ids,
+#         sorted_token_ids,
+#         cumsum,
+#         num_experts,
+#         numel,
+#         BLOCK=block_sort,
+#         num_warps=8,
+#         num_stages=1,
+#     )
+
+
 def moe_align_block_size_triton(
     topk_ids: torch.Tensor,
     num_experts: int,
