@@ -4,18 +4,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
-# # ---------------------- experimental ----------------------
-# from triton.experimental import gluon
-# from triton.experimental.gluon import language as gl
-# from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
-# from triton.experimental.gluon.language.nvidia.hopper import (
-#     fence_async_shared,
-#     tma,
-#     mbarrier,
-# )
-# from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
-
+import triton.experimental.tle.language.gpu as tle
 
 logger = logging.getLogger(__name__)
 
@@ -28,132 +17,16 @@ def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
 
-@triton.jit(do_not_specialize=["numel", "tokens_per_thread"])
-def moe_align_block_size_stage1(
-    topk_ids_ptr,
-    tokens_cnts_ptr,
-    num_experts: tl.constexpr,
-    numel,
-    tokens_per_thread,
-    sorted_token_ids_ptr,
-    expert_ids_ptr,
-    numel_sorted_token_ids: tl.constexpr,
-    numel_expert_ids: tl.constexpr,
-    block_size_sorted: tl.constexpr,
-    block_size_expert: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    offsets_sorted = pid * block_size_sorted + tl.arange(0, block_size_sorted)
-    mask_sorted = offsets_sorted < numel_sorted_token_ids
-    tl.store(sorted_token_ids_ptr + offsets_sorted, numel, mask=mask_sorted)
-
-    offsets_expert = pid * block_size_expert + tl.arange(0, block_size_expert)
-    mask_expert = offsets_expert < numel_expert_ids
-    tl.store(expert_ids_ptr + offsets_expert, 0, mask=mask_expert)
-
-    start_idx = pid * tokens_per_thread
-
-    off_c = (pid + 1) * num_experts
-
-    # Unroll loop by 4 for better instruction-level parallelism
-    UNROLL: tl.constexpr = 4
-    num_full_iters = tokens_per_thread // UNROLL
-
-    for iter_idx in range(num_full_iters):
-        base_i = iter_idx * UNROLL
-        for unroll_i in range(UNROLL):
-            i = base_i + unroll_i
-            if start_idx + i < numel:
-                idx = tl.load(topk_ids_ptr + start_idx + i)
-                token_cnt = tl.load(tokens_cnts_ptr + off_c + idx)
-                tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
-
-    for i in range(num_full_iters * UNROLL, tokens_per_thread):
-        if start_idx + i < numel:
-            idx = tl.load(topk_ids_ptr + start_idx + i)
-            token_cnt = tl.load(tokens_cnts_ptr + off_c + idx)
-            tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
-
-
-@triton.jit
-def moe_align_block_size_stage2_vec(
-    tokens_cnts_ptr,
-    num_experts: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    offset = tl.arange(0, num_experts) + 1
-    token_cnt = tl.load(tokens_cnts_ptr + offset * num_experts + pid)
-    cnt = tl.cumsum(token_cnt, axis=0)
-    tl.store(tokens_cnts_ptr + offset * num_experts + pid, cnt)
-
-
-@triton.jit
-def moe_align_block_size_stage2(
-    tokens_cnts_ptr,
-    num_experts: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    last_cnt = 0
-    for i in range(1, num_experts + 1):
-        token_cnt = tl.load(tokens_cnts_ptr + i * num_experts + pid)
-        last_cnt = last_cnt + token_cnt
-        tl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
-
-
-@triton.jit
-def moe_align_block_size_stage3(
-    total_tokens_post_pad_ptr,
-    tokens_cnts_ptr,
-    cumsum_ptr,
-    num_experts: tl.constexpr,
-    block_size: tl.constexpr,
-):
-    off_cnt = num_experts * num_experts
-
-    expert_offsets = tl.arange(0, num_experts)
-    token_cnts = tl.load(tokens_cnts_ptr + off_cnt + expert_offsets)
-    aligned_cnts = tl.cdiv(token_cnts, block_size) * block_size
-
-    cumsum_values = tl.cumsum(aligned_cnts, axis=0)
-    tl.store(cumsum_ptr + 1 + expert_offsets, cumsum_values)
-
-    total_tokens = tl.sum(aligned_cnts, axis=0)
-    tl.store(total_tokens_post_pad_ptr, total_tokens)
-
-
-@triton.jit(do_not_specialize=["numel"])
-def moe_align_block_size_stage4(
-    topk_ids_ptr,
-    sorted_token_ids_ptr,
-    expert_ids_ptr,
-    tokens_cnts_ptr,
-    cumsum_ptr,
-    num_experts: tl.constexpr,
-    block_size: tl.constexpr,
-    numel,
-    tokens_per_thread: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    start_idx = tl.load(cumsum_ptr + pid)
-    end_idx = tl.load(cumsum_ptr + pid + 1)
-
-    for i in range(start_idx, end_idx, block_size):
-        tl.store(expert_ids_ptr + i // block_size, pid)
-
-    start_idx = pid * tokens_per_thread
-    off_t = pid * num_experts
-
-    offset = tl.arange(0, tokens_per_thread) + start_idx
-    mask = offset < numel
-    expert_id = tl.load(topk_ids_ptr + offset, mask=mask)
-    token_idx_in_expert = tl.atomic_add(
-        tokens_cnts_ptr + off_t + expert_id, 1, mask=mask
-    )
-    rank_post_pad = token_idx_in_expert + tl.load(cumsum_ptr + expert_id, mask=mask)
-    tl.store(sorted_token_ids_ptr + rank_post_pad, offset, mask=mask)
+# # ---------------------- experimental ----------------------
+# from triton.experimental import gluon
+# from triton.experimental.gluon import language as gl
+# from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
+# from triton.experimental.gluon.language.nvidia.hopper import (
+#     fence_async_shared,
+#     tma,
+#     mbarrier,
+# )
+# from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 
 # @gluon.jit(do_not_specialize=["numel", "tokens_per_thread"])
@@ -294,11 +167,180 @@ def moe_align_block_size_stage4(
 #             #     gl.store(sorted_token_ids_ptr + rank_post_pad, i)
 #             #     gl.store(tokens_cnts_ptr + off_t + expert_id, 1)
 
+# def moe_align_block_size_triton_gluon(
+#     topk_ids: torch.Tensor,
+#     num_experts: int,
+#     block_size: int,
+#     sorted_token_ids: torch.Tensor,
+#     expert_ids: torch.Tensor,
+#     num_tokens_post_pad: torch.Tensor,
+# ) -> None:
+#     numel = topk_ids.numel()
+#     numel_sorted_token_ids = sorted_token_ids.numel()
+#     numel_expert_ids = expert_ids.numel()
+#     # The tensor needs to be padded before calculating IDs,
+#     # to prevent out-of-bounds address access.
+
+#     grid = (num_experts,)
+#     cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
+#     tokens_per_thread = triton.next_power_of_2(ceil_div(numel, num_experts))
+
+#     block_size_sorted = triton.next_power_of_2(
+#         ceil_div(numel_sorted_token_ids, num_experts)
+#     )
+#     block_size_expert = triton.next_power_of_2(ceil_div(numel_expert_ids, num_experts))
 
 
+#     tokens_cnts = torch.zeros(
+#         (num_experts), dtype=torch.int32, device=topk_ids.device
+#     )
+#     numel_sorted_token_ids = expert_ids.numel()
+#     numel_expert_ids = expert_ids.numel()
+#     WARP_SIZE = 32
+#     experts_per_warp = ceil_div(num_experts, WARP_SIZE)
+#     num_sync_points = 4
+#     sync_point = torch.zeros(
+#         (num_sync_points,), dtype=torch.int32, device=topk_ids.device
+#     )
+#     moe_align_block_size_kernel_gluon[grid](
+#         topk_ids,
+#         tokens_cnts,
+#         num_experts,
+#         numel,
+#         numel_sorted_token_ids,
+#         numel_expert_ids,
+#         block_size_sorted,
+#         block_size_expert,
+#         experts_per_warp,
+#         tokens_per_thread,
+#         cumsum,
+#         block_size,
+#         sorted_token_ids,
+#         expert_ids,
+#         num_tokens_post_pad,
+#         sync_point,
+#         launch_cooperative_grid=True,
+#         num_warps=1, 
+#     )
 
 
-def moe_align_block_size_triton(
+@triton.jit(do_not_specialize=["numel"])
+def moe_align_block_size_stage1(
+    topk_ids_ptr,
+    tokens_cnts_ptr,
+    num_experts: tl.constexpr,
+    numel,
+    tokens_per_thread: tl.constexpr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    numel_sorted_token_ids: tl.constexpr,
+    numel_expert_ids: tl.constexpr,
+    block_size_sorted: tl.constexpr,
+    block_size_expert: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    offsets_sorted = pid * block_size_sorted + tl.arange(0, block_size_sorted)
+    mask_sorted = offsets_sorted < numel_sorted_token_ids
+    tl.store(sorted_token_ids_ptr + offsets_sorted, numel, mask=mask_sorted)
+
+    offsets_expert = pid * block_size_expert + tl.arange(0, block_size_expert)
+    mask_expert = offsets_expert < numel_expert_ids
+    tl.store(expert_ids_ptr + offsets_expert, 0, mask=mask_expert)
+
+    start_idx = pid * tokens_per_thread
+
+    off_c = (pid + 1) * num_experts
+
+    offsets = start_idx + tl.arange(0, tokens_per_thread)
+    mask = offsets < numel
+    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0)
+    tl.atomic_add(tokens_cnts_ptr + off_c + expert_id, 1, mask=mask)
+
+
+@triton.jit
+def moe_align_block_size_stage2_vec(
+    tokens_cnts_ptr,
+    num_experts: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    offset = tl.arange(0, num_experts) + 1
+    token_cnt = tl.load(tokens_cnts_ptr + offset * num_experts + pid)
+    cnt = tl.cumsum(token_cnt, axis=0)
+    tl.store(tokens_cnts_ptr + offset * num_experts + pid, cnt)
+
+
+@triton.jit
+def moe_align_block_size_stage2(
+    tokens_cnts_ptr,
+    num_experts: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    last_cnt = 0
+    for i in range(1, num_experts + 1):
+        token_cnt = tl.load(tokens_cnts_ptr + i * num_experts + pid)
+        last_cnt = last_cnt + token_cnt
+        tl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
+
+
+@triton.jit
+def moe_align_block_size_stage3(
+    total_tokens_post_pad_ptr,
+    tokens_cnts_ptr,
+    cumsum_ptr,
+    num_experts: tl.constexpr,
+    num_experts_next_power_of_2: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    off_cnt = num_experts * num_experts
+
+    expert_offsets = tl.arange(0, num_experts_next_power_of_2)
+    mask = expert_offsets < num_experts
+    token_cnts = tl.load(tokens_cnts_ptr + off_cnt + expert_offsets, mask=mask)
+    aligned_cnts = tl.cdiv(token_cnts, block_size) * block_size
+
+    cumsum_values = tl.cumsum(aligned_cnts, axis=0)
+    tl.store(cumsum_ptr + 1 + expert_offsets, cumsum_values, mask=mask)
+
+    total_tokens = tl.sum(aligned_cnts, axis=0)
+    tl.store(total_tokens_post_pad_ptr, total_tokens)
+
+
+@triton.jit(do_not_specialize=["numel"])
+def moe_align_block_size_stage4(
+    topk_ids_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    tokens_cnts_ptr,
+    cumsum_ptr,
+    num_experts: tl.constexpr,
+    block_size: tl.constexpr,
+    numel,
+    tokens_per_thread: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    start_idx = tl.load(cumsum_ptr + pid)
+    end_idx = tl.load(cumsum_ptr + pid + 1)
+
+    for i in range(start_idx, end_idx, block_size):
+        tl.store(expert_ids_ptr + i // block_size, pid)
+
+    start_idx = pid * tokens_per_thread
+    off_t = pid * num_experts
+
+    offset = tl.arange(0, tokens_per_thread) + start_idx
+    mask = offset < numel
+    expert_id = tl.load(topk_ids_ptr + offset, mask=mask)
+    token_idx_in_expert = tl.atomic_add(
+        tokens_cnts_ptr + off_t + expert_id, 1, mask=mask
+    )
+    rank_post_pad = token_idx_in_expert + tl.load(cumsum_ptr + expert_id, mask=mask)
+    tl.store(sorted_token_ids_ptr + rank_post_pad, offset, mask=mask)
+
+
+def moe_align_block_size_triton_(
     topk_ids: torch.Tensor,
     num_experts: int,
     block_size: int,
@@ -321,43 +363,10 @@ def moe_align_block_size_triton(
     )
     block_size_expert = triton.next_power_of_2(ceil_div(numel_expert_ids, num_experts))
 
-
-    # tokens_cnts = torch.zeros(
-    #     (num_experts), dtype=torch.int32, device=topk_ids.device
-    # )
-    # numel_sorted_token_ids = expert_ids.numel()
-    # numel_expert_ids = expert_ids.numel()
-    # WARP_SIZE = 32
-    # experts_per_warp = ceil_div(num_experts, WARP_SIZE)
-    # num_sync_points = 4
-    # sync_point = torch.zeros(
-    #     (num_sync_points,), dtype=torch.int32, device=topk_ids.device
-    # )
-    # moe_align_block_size_kernel_gluon[grid](
-    #     topk_ids,
-    #     tokens_cnts,
-    #     num_experts,
-    #     numel,
-    #     numel_sorted_token_ids,
-    #     numel_expert_ids,
-    #     block_size_sorted,
-    #     block_size_expert,
-    #     experts_per_warp,
-    #     tokens_per_thread,
-    #     cumsum,
-    #     block_size,
-    #     sorted_token_ids,
-    #     expert_ids,
-    #     num_tokens_post_pad,
-    #     sync_point,
-    #     launch_cooperative_grid=True,
-    #     num_warps=1, 
-    # )
-
-
     tokens_cnts = torch.zeros(
         (num_experts + 1, num_experts), dtype=torch.int32, device=topk_ids.device
     )
+    num_experts_next_power_of_2 = triton.next_power_of_2(num_experts)
     moe_align_block_size_stage1[grid](
         topk_ids,
         tokens_cnts,
@@ -386,6 +395,7 @@ def moe_align_block_size_triton(
         tokens_cnts,
         cumsum,
         num_experts,
+        num_experts_next_power_of_2,
         block_size,
     )
     moe_align_block_size_stage4[grid](
@@ -400,6 +410,208 @@ def moe_align_block_size_triton(
         tokens_per_thread,
     )
 
+
+
+@triton.jit(do_not_specialize=["numel", "total_elems"])
+def moe_align_block_size_vllm_stage1_kernel(
+    topk_ids_ptr,
+    sorted_token_ids_ptr,
+    cumsum_ptr,
+    num_tokens_post_pad_ptr,
+    num_experts: tl.constexpr,
+    numel,
+    max_num_tokens_padded,
+    THREADS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_EXPERT: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_blocks = tl.cdiv(numel, THREADS)
+    if pid == 1:
+        num_sort_blocks = tl.cdiv(max_num_tokens_padded, THREADS)
+        i = 0
+        while i < num_sort_blocks:
+            base = i * THREADS
+            offsets = base + tl.arange(0, THREADS)
+            init_mask = offsets < max_num_tokens_padded
+            tl.store(sorted_token_ids_ptr + offsets, numel, mask=init_mask)
+            i += 1
+        return
+
+    expert_offsets = tl.arange(0, BLOCK_EXPERT)
+    expert_mask = expert_offsets < num_experts
+
+    smem_counts = tle.alloc(
+        [BLOCK_EXPERT],
+        dtype=tl.int32,
+        layout=None,
+        scope=tle.smem,
+        nv_mma_shared_layout=False,
+    )
+    smem_ptrs = tle.local_ptr(smem_counts, (expert_offsets, ))
+    tl.store(smem_ptrs, 0)
+    tl.debug_barrier()
+
+    ones = tl.full((THREADS, ), 1, tl.int32)
+    i = 0
+    while i + 1 < num_blocks:
+        base = i * THREADS
+        offsets = base + tl.arange(0, THREADS)
+        expert_id = tl.load(topk_ids_ptr + offsets).to(tl.int32)
+        count_ptrs = tle.local_ptr(smem_counts, (expert_id, ))
+        tl.atomic_add(count_ptrs, ones, sem="relaxed", scope="cta")
+        i += 1
+
+    base = (num_blocks - 1) * THREADS
+    offsets = base + tl.arange(0, THREADS)
+    tail_mask = offsets < numel
+    expert_id = tl.load(topk_ids_ptr + offsets, mask=tail_mask, other=0).to(tl.int32)
+    valid = tail_mask & (expert_id < num_experts)
+    expert_id = tl.where(valid, expert_id, 0)
+    count_ptrs = tle.local_ptr(smem_counts, (expert_id, ))
+    tl.atomic_add(count_ptrs, ones, mask=valid, sem="relaxed", scope="cta")
+
+    counts = tl.load(smem_ptrs)
+    counts = tl.where(expert_mask, counts, 0)
+    aligned = tl.cdiv(counts, BLOCK_SIZE) * BLOCK_SIZE
+    cumsum = tl.cumsum(aligned, axis=0)
+    tl.store(cumsum_ptr + 0, 0)
+    tl.store(cumsum_ptr + 1 + expert_offsets, cumsum, mask=expert_mask)
+    total = tl.sum(aligned, axis=0)
+    tl.store(num_tokens_post_pad_ptr, total)
+
+
+
+@triton.jit
+def moe_align_block_size_vllm_stage2_kernel(
+    cumsum_ptr,
+    expert_ids_ptr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_VEC: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    start_idx = tl.load(cumsum_ptr + pid) // BLOCK_SIZE
+    end_idx = tl.load(cumsum_ptr + pid + 1) // BLOCK_SIZE
+    num_blocks = end_idx - start_idx
+
+    pid_vec = tl.full((BLOCK_VEC, ), pid, tl.int32)
+    num_full_blocks = (num_blocks // BLOCK_VEC) * BLOCK_VEC
+
+    i = 0
+    while i < num_full_blocks:
+        offs = i + tl.arange(0, BLOCK_VEC)
+        tl.store(expert_ids_ptr + start_idx + offs, pid_vec)
+        i += BLOCK_VEC
+
+    if i < num_blocks:
+        offs = i + tl.arange(0, BLOCK_VEC)
+        mask = offs < num_blocks
+        tl.store(expert_ids_ptr + start_idx + offs, pid_vec, mask=mask)
+
+
+@triton.jit(do_not_specialize=["numel"])
+def moe_align_block_size_sort_kernel(
+    topk_ids_ptr,
+    sorted_token_ids_ptr,
+    cumsum_ptr,
+    numel,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < numel
+    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0, cache_modifier=".cv")
+    rank = tl.atomic_add(cumsum_ptr + expert_id, 1, mask=mask, sem="relaxed")
+    tl.store(sorted_token_ids_ptr + rank, offsets, mask=mask)
+
+
+def moe_align_block_size_triton_tle(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    numel = topk_ids.numel()
+    cumsum = torch.zeros((num_experts + 1, ), dtype=torch.int32, device=topk_ids.device)
+
+    block_expert = triton.cdiv(num_experts, 32) * 32
+    THREADS = 1024
+    max_num_tokens_padded = sorted_token_ids.numel()
+
+    moe_align_block_size_vllm_stage1_kernel[(2, )](
+        topk_ids,
+        sorted_token_ids,
+        cumsum,
+        num_tokens_post_pad,
+        num_experts,
+        numel,
+        max_num_tokens_padded,
+        THREADS=THREADS,
+        BLOCK_SIZE=block_size,
+        BLOCK_EXPERT=block_expert,
+        num_warps=32,
+        num_stages=1,
+    )
+
+    grid = (num_experts, )
+    moe_align_block_size_vllm_stage2_kernel[grid](
+        cumsum,
+        expert_ids,
+        BLOCK_SIZE=block_size,
+        BLOCK_VEC=32,
+        num_warps=1,
+        num_stages=1,
+    )
+
+    block_sort = 256
+    grid = (triton.cdiv(numel, block_sort), )
+    moe_align_block_size_sort_kernel[grid](
+        topk_ids,
+        sorted_token_ids,
+        cumsum,
+        numel,
+        BLOCK=block_sort,
+        num_warps=block_sort // 32,
+        num_stages=1,
+    )
+
+def moe_align_block_size_triton(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    # moe_align_block_size_triton_(
+    #     topk_ids,
+    #     num_experts,
+    #     block_size,
+    #     sorted_token_ids,
+    #     expert_ids,
+    #     num_tokens_post_pad,
+    # )
+    moe_align_block_size_triton_tle(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
+    # moe_align_block_size_triton_gluon(
+    #     topk_ids,
+    #     num_experts,
+    #     block_size,
+    #     sorted_token_ids,
+    #     expert_ids,
+    #     num_tokens_post_pad,
+    # )
+    
 
 def moe_align_block_size(
     topk_ids: torch.Tensor,

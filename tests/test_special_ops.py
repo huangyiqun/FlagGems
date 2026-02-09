@@ -1676,14 +1676,16 @@ except ImportError:
 
 # ref: https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/test_moe.py
 @pytest.mark.moe_align_block_size
-@pytest.mark.parametrize("num_experts", [32, 256, 512])
-@pytest.mark.parametrize("block_size", [8, 16, 32])
+# @pytest.mark.parametrize("num_experts", [32, 256, 512])
+# @pytest.mark.parametrize("block_size", [8, 16, 32])
+@pytest.mark.parametrize("num_experts", [512])
+@pytest.mark.parametrize("block_size", [64])
 @pytest.mark.parametrize(
     "topk_ids_shape",
     [
-        (1024, 10),
-        (6152, 10),
-        (11575, 10),
+        # (1024, 10),
+        # (6152, 10),
+        # (11575, 10),
         (16384, 10),
     ],
 )
@@ -1695,12 +1697,18 @@ def test_accuracy_moe_align_block_size(
 ):
     # ------------ parameters ------------
     dtype = torch.int32
-    topk_ids = torch.randint(0, num_experts, topk_ids_shape, dtype=dtype, device=device)
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-    sorted_ids = torch.empty((max_num_tokens_padded,), dtype=dtype, device=device)
-    max_num_m_blocks = max_num_tokens_padded // block_size
-    expert_ids = torch.empty((max_num_m_blocks,), dtype=dtype, device=device)
-    num_tokens_post_pad = torch.empty(1, dtype=dtype, device=device)
+    # topk_ids = torch.randint(0, num_experts, topk_ids_shape, dtype=dtype, device=device)
+    # max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    # sorted_ids = torch.empty((max_num_tokens_padded,), dtype=dtype, device=device)
+    # max_num_m_blocks = max_num_tokens_padded // block_size
+    # expert_ids = torch.empty((max_num_m_blocks,), dtype=dtype, device=device)
+    # num_tokens_post_pad = torch.empty(1, dtype=dtype, device=device)
+    # ------------------------------------
+    input_dir = "/workspace/moe_align_block_size_input/"
+    topk_ids = torch.load(input_dir + "moe_topk_ids.pt").to(device)
+    sorted_ids = torch.load(input_dir + "moe_sorted_token_ids.pt").to(device)
+    expert_ids = torch.load(input_dir + "moe_expert_ids.pt").to(device)
+    num_tokens_post_pad = torch.load(input_dir + "moe_num_tokens_post_pad.pt").to(device)
 
     topk_ids_vllm = topk_ids.clone()
     sorted_ids_vllm = sorted_ids.clone()

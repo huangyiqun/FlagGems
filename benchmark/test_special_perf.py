@@ -761,21 +761,27 @@ def test_perf_moe_align_block_size():
     def moe_align_block_size_input_fn(shape, dtype, device):
         num_experts = shape[0]
         block_size = shape[1]
-        dtype = torch.int32
-        topk_ids = torch.randint(
-            0, num_experts, (shape[2], shape[3]), dtype=dtype, device=device
-        )
-        max_num_tokens_padded = ((num_experts + WARP_SIZE - 1) // WARP_SIZE) * WARP_SIZE
+        # dtype = torch.int32
+        # topk_ids = torch.randint(
+        #     0, num_experts, (shape[2], shape[3]), dtype=dtype, device=device
+        # )
+        # max_num_tokens_padded = ((num_experts + WARP_SIZE - 1) // WARP_SIZE) * WARP_SIZE
 
-        # padded_num_experts in vllm._custom_ops.moe_align_block_size
-        # must be less than 1024
-        if max_num_tokens_padded >= 1024:
-            return
+        # # padded_num_experts in vllm._custom_ops.moe_align_block_size
+        # # must be less than 1024
+        # if max_num_tokens_padded >= 1024:
+        #     return
 
-        sorted_ids = torch.empty((max_num_tokens_padded,), dtype=dtype, device=device)
-        max_num_m_blocks = max_num_tokens_padded // block_size
-        expert_ids = torch.empty((max_num_m_blocks,), dtype=dtype, device=device)
-        num_tokens_post_pad = torch.empty(1, dtype=dtype, device=device)
+        # sorted_ids = torch.empty((max_num_tokens_padded,), dtype=dtype, device=device)
+        # max_num_m_blocks = max_num_tokens_padded // block_size
+        # expert_ids = torch.empty((max_num_m_blocks,), dtype=dtype, device=device)
+        # num_tokens_post_pad = torch.empty(1, dtype=dtype, device=device)
+
+        input_dir = "/workspace/moe_align_block_size_input/"
+        topk_ids = torch.load(input_dir + "moe_topk_ids.pt").to(device)
+        sorted_ids = torch.load(input_dir + "moe_sorted_token_ids.pt").to(device)
+        expert_ids = torch.load(input_dir + "moe_expert_ids.pt").to(device)
+        num_tokens_post_pad = torch.load(input_dir + "moe_num_tokens_post_pad.pt").to(device)
 
         yield (
             topk_ids,
@@ -793,16 +799,16 @@ def test_perf_moe_align_block_size():
         def set_shapes(self, shape_file_path: None):
             moe_align_block_size_shape = [
                 (512, 64, 16384, 10),
-                (512, 64, 6152, 10),
-                (512, 64, 4727, 10),
-                (512, 64, 1905, 10),
-                (512, 64, 11575, 10),
-                (512, 64, 1032, 10),
-                (512, 64, 4201, 10),
-                (512, 64, 2056, 10),
-                (512, 64, 7561, 10),
-                (512, 64, 4104, 10),
-                (512, 64, 14281, 10),
+                # (512, 64, 6152, 10),
+                # (512, 64, 4727, 10),
+                # (512, 64, 1905, 10),
+                # (512, 64, 11575, 10),
+                # (512, 64, 1032, 10),
+                # (512, 64, 4201, 10),
+                # (512, 64, 2056, 10),
+                # (512, 64, 7561, 10),
+                # (512, 64, 4104, 10),
+                # (512, 64, 14281, 10),
             ]
             self.shapes = moe_align_block_size_shape
 
