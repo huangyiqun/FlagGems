@@ -154,27 +154,27 @@ def mm_input_fn(b, m, n, k, cur_dtype, device, b_column_major):
 @pytest.mark.parametrize(
     "op_name, torch_op, input_fn, bench_cls",
     [
-        # pytest.param(
-        #     "addmm",
-        #     torch.addmm,
-        #     addmm_input_fn,
-        #     BlasBenchmark,
-        #     marks=pytest.mark.addmm,
-        # ),
-        # pytest.param(
-        #     "bmm",
-        #     torch.bmm,
-        #     bmm_input_fn,
-        #     BlasBenchmark,
-        #     marks=pytest.mark.bmm,
-        # ),
-        # pytest.param(
-        #     "mm",
-        #     torch.Tensor.mm,
-        #     mm_input_fn,
-        #     BlasBenchmark,
-        #     marks=pytest.mark.mm,
-        # ),
+        pytest.param(
+            "addmm",
+            torch.addmm,
+            addmm_input_fn,
+            BlasBenchmark,
+            marks=pytest.mark.addmm,
+        ),
+        pytest.param(
+            "bmm",
+            torch.bmm,
+            bmm_input_fn,
+            BlasBenchmark,
+            marks=pytest.mark.bmm,
+        ),
+        pytest.param(
+            "mm",
+            torch.Tensor.mm,
+            mm_input_fn,
+            BlasBenchmark,
+            marks=pytest.mark.mm,
+        ),
         pytest.param(
             "baddbmm",
             torch.baddbmm,
