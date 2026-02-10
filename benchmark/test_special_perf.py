@@ -821,3 +821,231 @@ def test_perf_moe_align_block_size():
 
     bench.set_gems(gems_op)
     bench.run()
+
+
+# =====================================================================
+# fused_moe (fused_experts) benchmark: vllm vs sglang
+# =====================================================================
+
+try:
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        fused_experts_impl as vllm_fused_experts_impl,
+    )
+
+    HAS_VLLM_FUSED_MOE = True
+except ImportError:
+    HAS_VLLM_FUSED_MOE = False
+
+try:
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
+        fused_experts_impl as sglang_fused_experts_impl,
+    )
+
+    HAS_SGLANG_FUSED_MOE = True
+except ImportError:
+    HAS_SGLANG_FUSED_MOE = False
+
+
+class FusedMoEBenchmark(Benchmark):
+    """
+    Benchmark for fused_moe (fused_experts) comparing vllm vs sglang.
+
+    Both vllm and sglang implement fused MoE via Triton kernels with the same
+    algorithmic structure (moe_align_block_size → GEMM1 → activation → GEMM2 → reduce).
+
+    Key differences in sglang vs vllm:
+      - sglang supports TMA (Tensor Memory Access) descriptors for the down projection
+      - sglang has a separate `down_config` for the second GEMM
+      - sglang fuses activation (silu_and_mul) via a custom Triton kernel with expert filtering
+      - sglang uses `moe_sum_reduce` with routed_scaling_factor support
+      - sglang supports `swap_ab` for transposed matmul on certain shapes
+      - vllm supports `naive_block_assignment` for sparse expert routing
+      - vllm supports OCP MX quantization schemes (mxfp4, mxfp6)
+      - vllm uses `moe_kernel_quantize_input` to quantize activations before each GEMM
+    """
+
+    def __init__(self, op_name, torch_op, dtypes, use_fp8_w8a8=False, block_shape=None):
+        super().__init__(op_name=op_name, torch_op=torch_op, dtypes=dtypes)
+        self.use_fp8_w8a8 = use_fp8_w8a8
+        self.block_shape = block_shape
+
+    def set_shapes(self, shape_file_path=None):
+        # Each config: (num_tokens, num_experts, hidden_size, intermediate_size, topk)
+        # These are representative shapes from real MoE models:
+        #   - Mixtral-8x7B: E=8, hidden=4096, intermediate=14336, topk=2
+        #   - DeepSeek-V3:  E=256, hidden=7168, intermediate=2048 (per-TP shard), topk=8
+        self.shapes = [
+            # Mixtral-like shapes
+            (1, 8, 4096, 14336, 2),
+            (4, 8, 4096, 14336, 2),
+            (16, 8, 4096, 14336, 2),
+            (64, 8, 4096, 14336, 2),
+            (128, 8, 4096, 14336, 2),
+            (256, 8, 4096, 14336, 2),
+            (512, 8, 4096, 14336, 2),
+            # DeepSeek-V3-like shapes (TP=8 shard)
+            (1, 256, 7168, 2048, 8),
+            (4, 256, 7168, 2048, 8),
+            (16, 256, 7168, 2048, 8),
+            (64, 256, 7168, 2048, 8),
+            (128, 256, 7168, 2048, 8),
+            (256, 256, 7168, 2048, 8),
+        ]
+
+    def get_input_iter(self, cur_dtype):
+        for config in self.shapes:
+            yield from self._fused_moe_input_fn(config, cur_dtype, self.device)
+
+    def _fused_moe_input_fn(self, config, dtype, device):
+        num_tokens, num_experts, hidden_size, intermediate_size, topk = config
+
+        hidden_states = torch.randn(
+            num_tokens, hidden_size, device=device, dtype=dtype
+        )
+
+        if self.use_fp8_w8a8:
+            w1 = torch.randn(
+                num_experts, intermediate_size * 2, hidden_size,
+                device=device, dtype=dtype
+            ).to(torch.float8_e4m3fn)
+            w2 = torch.randn(
+                num_experts, hidden_size, intermediate_size,
+                device=device, dtype=dtype
+            ).to(torch.float8_e4m3fn)
+
+            if self.block_shape is not None:
+                block_n, block_k = self.block_shape
+                w1_scale = torch.rand(
+                    num_experts,
+                    (intermediate_size * 2 + block_n - 1) // block_n,
+                    (hidden_size + block_k - 1) // block_k,
+                    device=device, dtype=torch.float32,
+                )
+                w2_scale = torch.rand(
+                    num_experts,
+                    (hidden_size + block_n - 1) // block_n,
+                    (intermediate_size + block_k - 1) // block_k,
+                    device=device, dtype=torch.float32,
+                )
+            else:
+                w1_scale = torch.rand(num_experts, device=device, dtype=torch.float32)
+                w2_scale = torch.rand(num_experts, device=device, dtype=torch.float32)
+            a1_scale = torch.rand(1, device=device, dtype=torch.float32)
+            a2_scale = torch.rand(1, device=device, dtype=torch.float32)
+        else:
+            w1 = torch.randn(
+                num_experts, intermediate_size * 2, hidden_size,
+                device=device, dtype=dtype,
+            )
+            w2 = torch.randn(
+                num_experts, hidden_size, intermediate_size,
+                device=device, dtype=dtype,
+            )
+            w1_scale = w2_scale = a1_scale = a2_scale = None
+
+        # Generate gating scores → topk_weights, topk_ids
+        gating = torch.randn(num_tokens, num_experts, device=device, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(
+            torch.softmax(gating, dim=-1), topk, dim=-1
+        )
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_weights = topk_weights.to(dtype)
+
+        yield (
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            self.use_fp8_w8a8,
+            w1_scale,
+            w2_scale,
+            a1_scale,
+            a2_scale,
+            self.block_shape,
+        )
+
+
+def _vllm_fused_experts_wrapper(
+    hidden_states, w1, w2, topk_weights, topk_ids,
+    use_fp8_w8a8, w1_scale, w2_scale, a1_scale, a2_scale, block_shape,
+):
+    """Wrapper to call vllm fused_experts_impl with a unified interface."""
+    return vllm_fused_experts_impl(
+        hidden_states.clone(),
+        w1, w2,
+        topk_weights, topk_ids,
+        inplace=False,
+        activation="silu",
+        use_fp8_w8a8=use_fp8_w8a8,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape,
+    )
+
+
+def _sglang_fused_experts_wrapper(
+    hidden_states, w1, w2, topk_weights, topk_ids,
+    use_fp8_w8a8, w1_scale, w2_scale, a1_scale, a2_scale, block_shape,
+):
+    """Wrapper to call sglang fused_experts_impl with a unified interface."""
+    return sglang_fused_experts_impl(
+        hidden_states.clone(),
+        w1, w2,
+        topk_weights, topk_ids,
+        inplace=False,
+        activation="silu",
+        use_fp8_w8a8=use_fp8_w8a8,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape,
+    )
+
+
+@pytest.mark.fused_moe
+@pytest.mark.skipif(
+    not HAS_VLLM_FUSED_MOE or not HAS_SGLANG_FUSED_MOE,
+    reason="vllm or sglang not installed",
+)
+def test_perf_fused_moe_vllm_vs_sglang():
+    """
+    Benchmark vllm vs sglang fused_experts (bf16, no quantization).
+
+    Uses vllm as the baseline (torch_op) and sglang as the gems_op.
+    The benchmark measures latency of the full fused MoE pipeline:
+      moe_align_block_size → GEMM1(up+gate) → SiLU+Mul → GEMM2(down) → reduce
+    """
+    bench = FusedMoEBenchmark(
+        op_name="fused_moe_vllm_vs_sglang",
+        torch_op=_vllm_fused_experts_wrapper,
+        dtypes=[torch.bfloat16],
+        use_fp8_w8a8=False,
+    )
+    bench.set_gems(_sglang_fused_experts_wrapper)
+    bench.run()
+
+
+@pytest.mark.fused_moe_fp8
+@pytest.mark.skipif(
+    not HAS_VLLM_FUSED_MOE or not HAS_SGLANG_FUSED_MOE,
+    reason="vllm or sglang not installed",
+)
+def test_perf_fused_moe_vllm_vs_sglang_fp8():
+    """
+    Benchmark vllm vs sglang fused_experts (FP8 w8a8, block quantization).
+
+    Uses block_shape=[128, 128] which is the standard DeepSeek-V3 configuration.
+    """
+    bench = FusedMoEBenchmark(
+        op_name="fused_moe_fp8_vllm_vs_sglang",
+        torch_op=_vllm_fused_experts_wrapper,
+        dtypes=[torch.bfloat16],
+        use_fp8_w8a8=True,
+        block_shape=[128, 128],
+    )
+    bench.set_gems(_sglang_fused_experts_wrapper)
+    bench.run()
