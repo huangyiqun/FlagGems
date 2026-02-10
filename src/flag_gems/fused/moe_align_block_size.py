@@ -223,7 +223,6 @@ def round_up(x: int, y: int) -> int:
 #         num_warps=1, 
 #     )
 
-
 @triton.jit(do_not_specialize=["numel"])
 def moe_align_block_size_stage1(
     topk_ids_ptr,
@@ -237,6 +236,7 @@ def moe_align_block_size_stage1(
     numel_expert_ids: tl.constexpr,
     block_size_sorted: tl.constexpr,
     block_size_expert: tl.constexpr,
+    BLOCK_EXPERT: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -249,14 +249,34 @@ def moe_align_block_size_stage1(
     tl.store(expert_ids_ptr + offsets_expert, 0, mask=mask_expert)
 
     start_idx = pid * tokens_per_thread
-
     off_c = (pid + 1) * num_experts
 
     offsets = start_idx + tl.arange(0, tokens_per_thread)
     mask = offsets < numel
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0)
-    tl.atomic_add(tokens_cnts_ptr + off_c + expert_id, 1, mask=mask)
+    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    valid = mask & (expert_id < num_experts)
+    expert_id = tl.where(valid, expert_id, 0)
 
+    expert_offsets = tl.arange(0, BLOCK_EXPERT)
+    expert_mask = expert_offsets < num_experts
+
+    smem_counts = tle.alloc(
+        [BLOCK_EXPERT],
+        dtype=tl.int32,
+        layout=None,
+        scope=tle.smem,
+        nv_mma_shared_layout=False,
+    )
+    smem_ptrs = tle.local_ptr(smem_counts, (expert_offsets, ))
+    tl.store(smem_ptrs, 0)
+    tl.debug_barrier()
+
+    count_ptrs = tle.local_ptr(smem_counts, (expert_id, ))
+    tl.atomic_add(count_ptrs, 1, mask=valid, sem="relaxed", scope="cta")
+    tl.debug_barrier()
+
+    counts = tl.load(smem_ptrs, mask=expert_mask, other=0)
+    tl.store(tokens_cnts_ptr + off_c + expert_offsets, counts, mask=expert_mask)
 
 @triton.jit
 def moe_align_block_size_stage2_vec(
@@ -367,6 +387,7 @@ def moe_align_block_size_triton_(
         (num_experts + 1, num_experts), dtype=torch.int32, device=topk_ids.device
     )
     num_experts_next_power_of_2 = triton.next_power_of_2(num_experts)
+    block_expert = triton.cdiv(num_experts, 32) * 32
     moe_align_block_size_stage1[grid](
         topk_ids,
         tokens_cnts,
@@ -379,6 +400,7 @@ def moe_align_block_size_triton_(
         numel_expert_ids,
         block_size_sorted,
         block_size_expert,
+        BLOCK_EXPERT=block_expert,
     )
     if num_experts == triton.next_power_of_2(num_experts):
         moe_align_block_size_stage2_vec[grid](
@@ -587,15 +609,7 @@ def moe_align_block_size_triton(
     expert_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
 ) -> None:
-    # moe_align_block_size_triton_(
-    #     topk_ids,
-    #     num_experts,
-    #     block_size,
-    #     sorted_token_ids,
-    #     expert_ids,
-    #     num_tokens_post_pad,
-    # )
-    moe_align_block_size_triton_tle(
+    moe_align_block_size_triton_(
         topk_ids,
         num_experts,
         block_size,
@@ -603,6 +617,14 @@ def moe_align_block_size_triton(
         expert_ids,
         num_tokens_post_pad,
     )
+    # moe_align_block_size_triton_tle(
+    #     topk_ids,
+    #     num_experts,
+    #     block_size,
+    #     sorted_token_ids,
+    #     expert_ids,
+    #     num_tokens_post_pad,
+    # )
     # moe_align_block_size_triton_gluon(
     #     topk_ids,
     #     num_experts,
