@@ -12,6 +12,7 @@ from flag_gems.fused.geglu import dgeglu, geglu
 from flag_gems.fused.gelu_and_mul import gelu_and_mul
 from flag_gems.fused.grouped_topk import grouped_topk
 from flag_gems.fused.instance_norm import instance_norm
+from flag_gems.fused.mhc import mhc_post, mhc_pre
 from flag_gems.fused.moe_align_block_size import (
     moe_align_block_size,
     moe_align_block_size_triton,
@@ -47,6 +48,8 @@ __all__ = [
     "gelu_and_mul",
     "grouped_topk",
     "instance_norm",
+    "mhc_post",
+    "mhc_pre",
     "moe_sum",
     "moe_align_block_size",
     "moe_align_block_size_triton",
