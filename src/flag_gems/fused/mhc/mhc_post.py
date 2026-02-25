@@ -58,7 +58,9 @@ def mhc_post_kernel(
     h_mask = h_offsets < H
 
     # Load d[n, h_offsets] -> (BLOCK_H,), bfloat16 -> float32
-    d_vals = tl.load(d_ptr + pid_n * d_stride_n + h_offsets * d_stride_h, mask=h_mask, other=0.0).to(tl.float32)
+    d_vals = tl.load(
+        d_ptr + pid_n * d_stride_n + h_offsets * d_stride_h, mask=h_mask, other=0.0
+    ).to(tl.float32)
 
     # For each output stream i in [0, HC):
     for i in tl.static_range(HC):
@@ -70,13 +72,22 @@ def mhc_post_kernel(
 
         # accumulate a[n, j, i] * b[n, j, h] for j in [0, HC)
         for j in tl.static_range(HC):
-            a_val = tl.load(a_ptr + pid_n * a_stride_n + j * a_stride_i + i * a_stride_j).to(tl.float32)
-            b_vals = tl.load(b_ptr + pid_n * b_stride_n + j * b_stride_i + h_offsets * b_stride_h, mask=h_mask, other=0.0).to(tl.float32)
+            a_val = tl.load(
+                a_ptr + pid_n * a_stride_n + j * a_stride_i + i * a_stride_j
+            ).to(tl.float32)
+            b_vals = tl.load(
+                b_ptr + pid_n * b_stride_n + j * b_stride_i + h_offsets * b_stride_h,
+                mask=h_mask,
+                other=0.0,
+            ).to(tl.float32)
             acc += a_val * b_vals
 
         # Store as bfloat16
         tl.store(
-            out_ptr + pid_n * out_stride_n + i * out_stride_i + h_offsets * out_stride_h,
+            out_ptr
+            + pid_n * out_stride_n
+            + i * out_stride_i
+            + h_offsets * out_stride_h,
             acc.to(tl.bfloat16),
             mask=h_mask,
         )
@@ -102,7 +113,10 @@ def mhc_post(
     """
     logger.debug(
         "GEMS MHC_POST FORWARD, x=%s, residual=%s, post_layer_mix=%s, comb_res_mix=%s",
-        x.shape, residual.shape, post_layer_mix.shape, comb_res_mix.shape,
+        x.shape,
+        residual.shape,
+        post_layer_mix.shape,
+        comb_res_mix.shape,
     )
 
     N, hc, H = residual.shape
@@ -122,12 +136,24 @@ def mhc_post(
     grid = (N, triton.cdiv(H, BLOCK_H))
 
     mhc_post_kernel[grid](
-        a, b, c, d, out,
-        a.stride(0), a.stride(1), a.stride(2),
-        b.stride(0), b.stride(1), b.stride(2),
-        c.stride(0), c.stride(1),
-        d.stride(0), d.stride(1),
-        out.stride(0), out.stride(1), out.stride(2),
+        a,
+        b,
+        c,
+        d,
+        out,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        c.stride(0),
+        c.stride(1),
+        d.stride(0),
+        d.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
         H=H,
         HC=hc,
         BLOCK_H=BLOCK_H,

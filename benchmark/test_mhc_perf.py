@@ -6,11 +6,9 @@ Usage:
 """
 
 import sys
-from itertools import product
 
 import pytest
 import torch
-import triton
 
 from flag_gems.fused.mhc.mhc_post import mhc_post, mhc_post_ref
 from flag_gems.fused.mhc.mhc_pre import mhc_pre, mhc_pre_ref
@@ -34,6 +32,7 @@ except ImportError:
 #  mhc_post benchmark
 # ═══════════════════════════════════════════════════════════════
 
+
 class MHCPostBenchmark(Benchmark):
     DEFAULT_SHAPE_DESC = "N, H"
 
@@ -51,9 +50,15 @@ class MHCPostBenchmark(Benchmark):
         for n, h in self.shapes:
             hc_mult = 4
             x = torch.randn((n, h), dtype=torch.bfloat16, device=self.device)
-            residual = torch.randn((n, hc_mult, h), dtype=torch.bfloat16, device=self.device)
-            post_layer_mix = torch.randn((n, hc_mult, 1), dtype=torch.float32, device=self.device)
-            comb_res_mix = torch.randn((n, hc_mult, hc_mult), dtype=torch.float32, device=self.device)
+            residual = torch.randn(
+                (n, hc_mult, h), dtype=torch.bfloat16, device=self.device
+            )
+            post_layer_mix = torch.randn(
+                (n, hc_mult, 1), dtype=torch.float32, device=self.device
+            )
+            comb_res_mix = torch.randn(
+                (n, hc_mult, hc_mult), dtype=torch.float32, device=self.device
+            )
             yield x, residual, post_layer_mix, comb_res_mix
 
 
@@ -83,6 +88,7 @@ def test_perf_mhc_post_vs_tilelang():
 # ═══════════════════════════════════════════════════════════════
 #  mhc_pre benchmark
 # ═══════════════════════════════════════════════════════════════
+
 
 class MHCPreBenchmark(Benchmark):
     DEFAULT_SHAPE_DESC = "N, hidden_size"
@@ -115,7 +121,9 @@ class MHCPreBenchmark(Benchmark):
                 .bfloat16()
             )
             fn = (
-                torch.randn((hc_mult3, hc_mult, hidden_size), dtype=torch.float, device=device)
+                torch.randn(
+                    (hc_mult3, hc_mult, hidden_size), dtype=torch.float, device=device
+                )
                 * 1e-4
                 * (1 + torch.arange(hc_mult, device=device).mul(0.01).view(1, -1, 1))
             ).flatten(1, 2)
@@ -123,11 +131,14 @@ class MHCPreBenchmark(Benchmark):
             hc_base = torch.randn((hc_mult3,), dtype=torch.float, device=device) * 0.1
 
             yield (
-                residual, fn, hc_scale, hc_base,
-                1e-6,   # rms_eps
-                1e-6,   # hc_pre_eps
-                1e-6,   # hc_sinkhorn_eps
-                1.0,    # hc_post_mult_value
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                1e-6,  # rms_eps
+                1e-6,  # hc_pre_eps
+                1e-6,  # hc_sinkhorn_eps
+                1.0,  # hc_post_mult_value
                 self.sinkhorn_repeat,
             )
 
