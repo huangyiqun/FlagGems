@@ -899,18 +899,18 @@ class FusedMoEBenchmark(Benchmark):
     def _fused_moe_input_fn(self, config, dtype, device):
         num_tokens, num_experts, hidden_size, intermediate_size, topk = config
 
-        hidden_states = torch.randn(
-            num_tokens, hidden_size, device=device, dtype=dtype
-        )
+        hidden_states = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype)
 
         if self.use_fp8_w8a8:
             w1 = torch.randn(
-                num_experts, intermediate_size * 2, hidden_size,
-                device=device, dtype=dtype
+                num_experts,
+                intermediate_size * 2,
+                hidden_size,
+                device=device,
+                dtype=dtype,
             ).to(torch.float8_e4m3fn)
             w2 = torch.randn(
-                num_experts, hidden_size, intermediate_size,
-                device=device, dtype=dtype
+                num_experts, hidden_size, intermediate_size, device=device, dtype=dtype
             ).to(torch.float8_e4m3fn)
 
             if self.block_shape is not None:
@@ -919,13 +919,15 @@ class FusedMoEBenchmark(Benchmark):
                     num_experts,
                     (intermediate_size * 2 + block_n - 1) // block_n,
                     (hidden_size + block_k - 1) // block_k,
-                    device=device, dtype=torch.float32,
+                    device=device,
+                    dtype=torch.float32,
                 )
                 w2_scale = torch.rand(
                     num_experts,
                     (hidden_size + block_n - 1) // block_n,
                     (intermediate_size + block_k - 1) // block_k,
-                    device=device, dtype=torch.float32,
+                    device=device,
+                    dtype=torch.float32,
                 )
             else:
                 w1_scale = torch.rand(num_experts, device=device, dtype=torch.float32)
@@ -934,20 +936,26 @@ class FusedMoEBenchmark(Benchmark):
             a2_scale = torch.rand(1, device=device, dtype=torch.float32)
         else:
             w1 = torch.randn(
-                num_experts, intermediate_size * 2, hidden_size,
-                device=device, dtype=dtype,
+                num_experts,
+                intermediate_size * 2,
+                hidden_size,
+                device=device,
+                dtype=dtype,
             )
             w2 = torch.randn(
-                num_experts, hidden_size, intermediate_size,
-                device=device, dtype=dtype,
+                num_experts,
+                hidden_size,
+                intermediate_size,
+                device=device,
+                dtype=dtype,
             )
             w1_scale = w2_scale = a1_scale = a2_scale = None
 
         # Generate gating scores → topk_weights, topk_ids
-        gating = torch.randn(num_tokens, num_experts, device=device, dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(
-            torch.softmax(gating, dim=-1), topk, dim=-1
+        gating = torch.randn(
+            num_tokens, num_experts, device=device, dtype=torch.float32
         )
+        topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), topk, dim=-1)
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
         topk_weights = topk_weights.to(dtype)
 
@@ -967,14 +975,25 @@ class FusedMoEBenchmark(Benchmark):
 
 
 def _vllm_fused_experts_wrapper(
-    hidden_states, w1, w2, topk_weights, topk_ids,
-    use_fp8_w8a8, w1_scale, w2_scale, a1_scale, a2_scale, block_shape,
+    hidden_states,
+    w1,
+    w2,
+    topk_weights,
+    topk_ids,
+    use_fp8_w8a8,
+    w1_scale,
+    w2_scale,
+    a1_scale,
+    a2_scale,
+    block_shape,
 ):
     """Wrapper to call vllm fused_experts_impl with a unified interface."""
     return vllm_fused_experts_impl(
         hidden_states.clone(),
-        w1, w2,
-        topk_weights, topk_ids,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
         inplace=False,
         activation="silu",
         use_fp8_w8a8=use_fp8_w8a8,
@@ -987,14 +1006,25 @@ def _vllm_fused_experts_wrapper(
 
 
 def _sglang_fused_experts_wrapper(
-    hidden_states, w1, w2, topk_weights, topk_ids,
-    use_fp8_w8a8, w1_scale, w2_scale, a1_scale, a2_scale, block_shape,
+    hidden_states,
+    w1,
+    w2,
+    topk_weights,
+    topk_ids,
+    use_fp8_w8a8,
+    w1_scale,
+    w2_scale,
+    a1_scale,
+    a2_scale,
+    block_shape,
 ):
     """Wrapper to call sglang fused_experts_impl with a unified interface."""
     return sglang_fused_experts_impl(
         hidden_states.clone(),
-        w1, w2,
-        topk_weights, topk_ids,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
         inplace=False,
         activation="silu",
         use_fp8_w8a8=use_fp8_w8a8,

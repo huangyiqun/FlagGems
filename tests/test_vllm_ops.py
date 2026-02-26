@@ -1,5 +1,4 @@
 import random
-import sys
 from itertools import product
 from math import ceil
 from typing import Optional
@@ -12,19 +11,6 @@ import flag_gems
 from .conftest import QUICK_MODE
 
 random.seed(42)
-
-
-@pytest.fixture(autouse=False)
-def disable_tle():
-    """Disable TLE in moe_align_block_size to work around Triton compilation
-    bug with tle.alloc on some platforms/versions."""
-    import flag_gems.fused.moe_align_block_size  # noqa: F811
-
-    mod = sys.modules["flag_gems.fused.moe_align_block_size"]
-    saved = mod.HAS_TLE
-    mod.HAS_TLE = False
-    yield
-    mod.HAS_TLE = saved
 
 
 def is_vllm_available():
@@ -270,7 +256,6 @@ def torch_moe_forward(
         result += topk_weight * output_part
     """
     M, K = hidden_states.shape
-    E = w1.shape[0]
     N = w1.shape[1]  # intermediate_size * 2
     top_k = topk_ids.shape[1]
 
@@ -318,10 +303,20 @@ if not QUICK_MODE:
         (4, 16, 512, 1024, 2),
     ]
 
+try:
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        fused_experts_impl as vllm_fused_experts_impl,
+    )
+
+    HAS_VLLM_FUSED_MOE = True
+except ImportError:
+    HAS_VLLM_FUSED_MOE = False
+
 
 @pytest.mark.fused_moe
 @pytest.mark.parametrize("config", FUSED_MOE_CONFIGS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(not HAS_VLLM_FUSED_MOE, reason="vllm not installed")
 @pytest.mark.usefixtures("disable_tle")
 def test_accuracy_fused_moe(config, dtype):
     """Test FlagGems fused_moe against a pure PyTorch reference."""
@@ -331,9 +326,7 @@ def test_accuracy_fused_moe(config, dtype):
     torch.manual_seed(0)
 
     # Generate inputs with controlled magnitude to avoid numerical blow-up
-    hidden_states = torch.randn(
-        num_tokens, hidden_size, device=device, dtype=dtype
-    )
+    hidden_states = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype)
     w1 = torch.randn(
         num_experts, intermediate_size * 2, hidden_size, device=device, dtype=dtype
     ) * (1.0 / hidden_size**0.5)
@@ -342,24 +335,28 @@ def test_accuracy_fused_moe(config, dtype):
     ) * (1.0 / intermediate_size**0.5)
 
     # Generate routing
-    gating = torch.randn(
-        num_tokens, num_experts, device=device, dtype=torch.float32
-    )
-    topk_weights, topk_ids = torch.topk(
-        torch.softmax(gating, dim=-1), topk, dim=-1
-    )
+    gating = torch.randn(num_tokens, num_experts, device=device, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), topk, dim=-1)
     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     topk_weights = topk_weights.to(dtype)
 
     # FlagGems result
     result = flag_gems.fused_moe(
-        hidden_states, w1, w2, topk_weights, topk_ids,
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
         num_experts=num_experts,
     )
 
     # Reference result
-    ref = torch_moe_forward(
-        hidden_states, w1, w2, topk_weights, topk_ids,
+    ref = vllm_fused_experts_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
     )
 
     torch.cuda.synchronize()

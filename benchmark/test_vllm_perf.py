@@ -294,24 +294,26 @@ class FusedMoEBenchmark(Benchmark):
         num_tokens, num_experts, hidden_size, intermediate_size, topk = config
         device = flag_gems.device
 
-        hidden_states = torch.randn(
-            num_tokens, hidden_size, device=device, dtype=dtype
-        )
+        hidden_states = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype)
         w1 = torch.randn(
-            num_experts, intermediate_size * 2, hidden_size,
-            device=device, dtype=dtype,
+            num_experts,
+            intermediate_size * 2,
+            hidden_size,
+            device=device,
+            dtype=dtype,
         )
         w2 = torch.randn(
-            num_experts, hidden_size, intermediate_size,
-            device=device, dtype=dtype,
+            num_experts,
+            hidden_size,
+            intermediate_size,
+            device=device,
+            dtype=dtype,
         )
 
         gating = torch.randn(
             num_tokens, num_experts, device=device, dtype=torch.float32
         )
-        topk_weights, topk_ids = torch.topk(
-            torch.softmax(gating, dim=-1), topk, dim=-1
-        )
+        topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), topk, dim=-1)
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
         topk_weights = topk_weights.to(dtype)
 
@@ -321,16 +323,24 @@ class FusedMoEBenchmark(Benchmark):
 def _vllm_fused_moe_wrapper(hidden_states, w1, w2, topk_weights, topk_ids):
     """Wrapper to call vllm fused_experts_impl."""
     return vllm_fused_experts_impl(
-        hidden_states.clone(), w1, w2,
-        topk_weights, topk_ids,
-        inplace=False, activation="silu",
+        hidden_states.clone(),
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace=False,
+        activation="silu",
     )
 
 
 def _gems_fused_moe_wrapper(hidden_states, w1, w2, topk_weights, topk_ids):
     """Wrapper to call FlagGems fused_moe."""
     return flag_gems.fused_moe(
-        hidden_states, w1, w2, topk_weights, topk_ids,
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
     )
 
 

@@ -145,9 +145,16 @@ def fused_moe_kernel(
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
     if off_experts == -1:
         write_zeros_to_output(
-            c_ptr, stride_cm, stride_cn, pid_n, N,
-            offs_token, token_mask,
-            BLOCK_SIZE_M, BLOCK_SIZE_N, compute_type,
+            c_ptr,
+            stride_cm,
+            stride_cn,
+            pid_n,
+            N,
+            offs_token,
+            token_mask,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            compute_type,
         )
         return
 
@@ -222,7 +229,9 @@ def fused_moe_kernel(
     # Router weight multiplication (in float32 for numerical stability)
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(
-            topk_weights_ptr + offs_token, mask=token_mask, other=0,
+            topk_weights_ptr + offs_token,
+            mask=token_mask,
+            other=0,
         )
         accumulator *= moe_weight[:, None]
 
@@ -341,9 +350,7 @@ def invoke_fused_moe_triton_kernel(
     num_tokens = M * top_k
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
-        EM = min(
-            sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"]
-        )
+        EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
 
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -432,7 +439,9 @@ def fused_moe(
         output: [num_tokens, hidden_size]
     """
     logger.debug("GEMS FUSED MOE")
-    assert activation == "silu", f"Only 'silu' activation is supported, got {activation}"
+    assert (
+        activation == "silu"
+    ), f"Only 'silu' activation is supported, got {activation}"
 
     M, K = hidden_states.shape
     E = w1.shape[0]
@@ -474,9 +483,7 @@ def fused_moe(
         (M, top_k, K), dtype=hidden_states.dtype, device=hidden_states.device
     )
     # Final output: [M, K]
-    output = torch.zeros(
-        (M, K), dtype=hidden_states.dtype, device=hidden_states.device
-    )
+    output = torch.zeros((M, K), dtype=hidden_states.dtype, device=hidden_states.device)
 
     # Step 2: GEMM1 — hidden_states @ W1 → intermediate_cache1
     invoke_fused_moe_triton_kernel(
