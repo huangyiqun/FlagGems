@@ -240,53 +240,6 @@ def test_cutlass_scaled_mm(p):
 # =====================================================================
 
 
-def torch_moe_forward(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Pure PyTorch reference implementation of the full MoE forward pass.
-
-    Pipeline: for each token, for each of its top-k experts:
-        intermediate = hidden_states @ W1[expert].T   → SiLU(gate) * up
-        output_part  = intermediate @ W2[expert].T     → down projection
-        result += topk_weight * output_part
-    """
-    M, K = hidden_states.shape
-    N = w1.shape[1]  # intermediate_size * 2
-    top_k = topk_ids.shape[1]
-
-    output = torch.zeros(M, K, dtype=hidden_states.dtype, device=hidden_states.device)
-
-    for i in range(M):
-        for j in range(top_k):
-            expert_id = topk_ids[i, j].item()
-            weight = topk_weights[i, j]
-
-            # GEMM1: hidden_states[i] @ W1[expert].T → [N]
-            gemm1_out = hidden_states[i].to(torch.float32) @ w1[expert_id].T.to(
-                torch.float32
-            )
-
-            # SiLU + Mul activation
-            half_N = N // 2
-            gate = gemm1_out[:half_N]
-            up = gemm1_out[half_N:]
-            silu_gate = gate * torch.sigmoid(gate)
-            activated = silu_gate * up
-
-            # GEMM2: activated @ W2[expert].T → [K]
-            gemm2_out = activated @ w2[expert_id].T.to(torch.float32)
-
-            # Weighted sum
-            output[i] += (weight * gemm2_out).to(hidden_states.dtype)
-
-    return output
-
-
 FUSED_MOE_CONFIGS = [
     # (num_tokens, num_experts, hidden_size, intermediate_size, topk)
     (1, 8, 128, 256, 2),
