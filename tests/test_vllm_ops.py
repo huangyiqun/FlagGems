@@ -317,7 +317,6 @@ except ImportError:
 @pytest.mark.parametrize("config", FUSED_MOE_CONFIGS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(not HAS_VLLM_FUSED_MOE, reason="vllm not installed")
-@pytest.mark.usefixtures("disable_tle")
 def test_accuracy_fused_moe(config, dtype):
     """Test FlagGems fused_moe against a pure PyTorch reference."""
     num_tokens, num_experts, hidden_size, intermediate_size, topk = config
