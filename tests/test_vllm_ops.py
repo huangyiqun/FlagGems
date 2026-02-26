@@ -1,4 +1,5 @@
 import random
+import sys
 from itertools import product
 from math import ceil
 from typing import Optional
@@ -11,6 +12,19 @@ import flag_gems
 from .conftest import QUICK_MODE
 
 random.seed(42)
+
+
+@pytest.fixture(autouse=False)
+def disable_tle():
+    """Disable TLE in moe_align_block_size to work around Triton compilation
+    bug with tle.alloc on some platforms/versions."""
+    import flag_gems.fused.moe_align_block_size  # noqa: F811
+
+    mod = sys.modules["flag_gems.fused.moe_align_block_size"]
+    saved = mod.HAS_TLE
+    mod.HAS_TLE = False
+    yield
+    mod.HAS_TLE = saved
 
 
 def is_vllm_available():
@@ -233,3 +247,126 @@ def test_cutlass_scaled_mm(p):
         rtol, atol = 5e-1, 1.5e-1
 
     torch.testing.assert_close(c, output_ref, rtol=rtol, atol=atol)
+
+
+# =====================================================================
+# Fused MoE (fused_experts) correctness tests
+# =====================================================================
+
+
+def torch_moe_forward(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Pure PyTorch reference implementation of the full MoE forward pass.
+
+    Pipeline: for each token, for each of its top-k experts:
+        intermediate = hidden_states @ W1[expert].T   → SiLU(gate) * up
+        output_part  = intermediate @ W2[expert].T     → down projection
+        result += topk_weight * output_part
+    """
+    M, K = hidden_states.shape
+    E = w1.shape[0]
+    N = w1.shape[1]  # intermediate_size * 2
+    top_k = topk_ids.shape[1]
+
+    output = torch.zeros(M, K, dtype=hidden_states.dtype, device=hidden_states.device)
+
+    for i in range(M):
+        for j in range(top_k):
+            expert_id = topk_ids[i, j].item()
+            weight = topk_weights[i, j]
+
+            # GEMM1: hidden_states[i] @ W1[expert].T → [N]
+            gemm1_out = hidden_states[i].to(torch.float32) @ w1[expert_id].T.to(
+                torch.float32
+            )
+
+            # SiLU + Mul activation
+            half_N = N // 2
+            gate = gemm1_out[:half_N]
+            up = gemm1_out[half_N:]
+            silu_gate = gate * torch.sigmoid(gate)
+            activated = silu_gate * up
+
+            # GEMM2: activated @ W2[expert].T → [K]
+            gemm2_out = activated @ w2[expert_id].T.to(torch.float32)
+
+            # Weighted sum
+            output[i] += (weight * gemm2_out).to(hidden_states.dtype)
+
+    return output
+
+
+FUSED_MOE_CONFIGS = [
+    # (num_tokens, num_experts, hidden_size, intermediate_size, topk)
+    (1, 8, 128, 256, 2),
+    (4, 8, 128, 256, 2),
+    (8, 4, 64, 128, 2),
+    (16, 8, 256, 512, 2),
+    (32, 8, 128, 256, 4),
+]
+
+if not QUICK_MODE:
+    FUSED_MOE_CONFIGS += [
+        (64, 8, 256, 512, 2),
+        (128, 16, 128, 256, 4),
+        (4, 16, 512, 1024, 2),
+    ]
+
+
+@pytest.mark.fused_moe
+@pytest.mark.parametrize("config", FUSED_MOE_CONFIGS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.usefixtures("disable_tle")
+def test_accuracy_fused_moe(config, dtype):
+    """Test FlagGems fused_moe against a pure PyTorch reference."""
+    num_tokens, num_experts, hidden_size, intermediate_size, topk = config
+    device = flag_gems.device
+
+    torch.manual_seed(0)
+
+    # Generate inputs with controlled magnitude to avoid numerical blow-up
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, device=device, dtype=dtype
+    )
+    w1 = torch.randn(
+        num_experts, intermediate_size * 2, hidden_size, device=device, dtype=dtype
+    ) * (1.0 / hidden_size**0.5)
+    w2 = torch.randn(
+        num_experts, hidden_size, intermediate_size, device=device, dtype=dtype
+    ) * (1.0 / intermediate_size**0.5)
+
+    # Generate routing
+    gating = torch.randn(
+        num_tokens, num_experts, device=device, dtype=torch.float32
+    )
+    topk_weights, topk_ids = torch.topk(
+        torch.softmax(gating, dim=-1), topk, dim=-1
+    )
+    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights = topk_weights.to(dtype)
+
+    # FlagGems result
+    result = flag_gems.fused_moe(
+        hidden_states, w1, w2, topk_weights, topk_ids,
+        num_experts=num_experts,
+    )
+
+    # Reference result
+    ref = torch_moe_forward(
+        hidden_states, w1, w2, topk_weights, topk_ids,
+    )
+
+    torch.cuda.synchronize()
+
+    # Fused bf16/fp16 kernels accumulate rounding errors across two GEMMs
+    # and an activation; use tolerances proportional to output magnitude.
+    rtol = 1e-1
+    atol = max(1e-2, ref.abs().max().item() * 1e-2)
+
+    torch.testing.assert_close(result, ref, rtol=rtol, atol=atol)
