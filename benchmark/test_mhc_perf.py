@@ -38,12 +38,9 @@ class MHCPostBenchmark(Benchmark):
 
     def set_shapes(self, shape_file_path=None):
         self.shapes = [
-            (512, 1280),
-            (1024, 2560),
             (4096, 1280),
             (4096, 2560),
             (4096, 7168),
-            (8192, 7168),
         ]
 
     def get_input_iter(self, cur_dtype):
@@ -101,10 +98,16 @@ class MHCPreBenchmark(Benchmark):
     def set_shapes(self, shape_file_path=None):
         self.shapes = [
             (512, 1280),
+            (512, 2560),
+            (512, 4096),
+            (1024, 1280),
             (1024, 2560),
+            (1024, 4096),
+            (2048, 1280),
+            (2048, 2560),
             (2048, 4096),
-            (4096, 1280),
-            (4096, 2560),
+            (8192, 1280),
+            (8192, 2560),
             (8192, 4096),
         ]
 

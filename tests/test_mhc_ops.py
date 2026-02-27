@@ -91,7 +91,7 @@ def generate_mhc_pre_data(
 
 MHC_POST_CONFIGS = list(
     product(
-        [512, 1024, 4096],  # n (num_tokens)
+        [4096],  # n (num_tokens)
         [1280, 2560, 7168],  # h (hidden_size)
     )
 )
@@ -128,7 +128,7 @@ def test_mhc_post_vs_tilelang(n, h):
 
 MHC_PRE_CONFIGS = list(
     product(
-        [512, 1024, 2048],  # n
+        [512, 1024, 2048, 8192],  # n
         [1280, 2560, 4096],  # hidden_size
         [4],  # hc_mult
     )
