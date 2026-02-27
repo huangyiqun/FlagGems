@@ -38,7 +38,6 @@ def mhc_post_kernel(
     out_stride_i,
     out_stride_h,
     H: tl.constexpr,
-    HC: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """
@@ -81,6 +80,7 @@ def mhc_post_kernel(
     # Load all 16 comb_res_mix scalars + 4 post_layer_mix scalars for this token
     a_base = pid_n * a_stride_n
     c_base = pid_n * c_stride_n
+    out_base = pid_n * out_stride_n
 
     # For output stream i=0
     c0 = tl.load(c_ptr + c_base + 0 * c_stride_i).to(tl.float32)
@@ -89,6 +89,11 @@ def mhc_post_kernel(
     a20 = tl.load(a_ptr + a_base + 2 * a_stride_i + 0 * a_stride_j).to(tl.float32)
     a30 = tl.load(a_ptr + a_base + 3 * a_stride_i + 0 * a_stride_j).to(tl.float32)
     acc0 = c0 * d_vals + a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3
+    tl.store(
+        out_ptr + out_base + 0 * out_stride_i + h_offsets * out_stride_h,
+        acc0.to(tl.bfloat16),
+        mask=h_mask,
+    )
 
     # For output stream i=1
     c1 = tl.load(c_ptr + c_base + 1 * c_stride_i).to(tl.float32)
@@ -97,6 +102,11 @@ def mhc_post_kernel(
     a21 = tl.load(a_ptr + a_base + 2 * a_stride_i + 1 * a_stride_j).to(tl.float32)
     a31 = tl.load(a_ptr + a_base + 3 * a_stride_i + 1 * a_stride_j).to(tl.float32)
     acc1 = c1 * d_vals + a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3
+    tl.store(
+        out_ptr + out_base + 1 * out_stride_i + h_offsets * out_stride_h,
+        acc1.to(tl.bfloat16),
+        mask=h_mask,
+    )
 
     # For output stream i=2
     c2 = tl.load(c_ptr + c_base + 2 * c_stride_i).to(tl.float32)
@@ -105,6 +115,11 @@ def mhc_post_kernel(
     a22 = tl.load(a_ptr + a_base + 2 * a_stride_i + 2 * a_stride_j).to(tl.float32)
     a32 = tl.load(a_ptr + a_base + 3 * a_stride_i + 2 * a_stride_j).to(tl.float32)
     acc2 = c2 * d_vals + a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3
+    tl.store(
+        out_ptr + out_base + 2 * out_stride_i + h_offsets * out_stride_h,
+        acc2.to(tl.bfloat16),
+        mask=h_mask,
+    )
 
     # For output stream i=3
     c3 = tl.load(c_ptr + c_base + 3 * c_stride_i).to(tl.float32)
@@ -113,24 +128,6 @@ def mhc_post_kernel(
     a23 = tl.load(a_ptr + a_base + 2 * a_stride_i + 3 * a_stride_j).to(tl.float32)
     a33 = tl.load(a_ptr + a_base + 3 * a_stride_i + 3 * a_stride_j).to(tl.float32)
     acc3 = c3 * d_vals + a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3
-
-    # Store all 4 output streams
-    out_base = pid_n * out_stride_n
-    tl.store(
-        out_ptr + out_base + 0 * out_stride_i + h_offsets * out_stride_h,
-        acc0.to(tl.bfloat16),
-        mask=h_mask,
-    )
-    tl.store(
-        out_ptr + out_base + 1 * out_stride_i + h_offsets * out_stride_h,
-        acc1.to(tl.bfloat16),
-        mask=h_mask,
-    )
-    tl.store(
-        out_ptr + out_base + 2 * out_stride_i + h_offsets * out_stride_h,
-        acc2.to(tl.bfloat16),
-        mask=h_mask,
-    )
     tl.store(
         out_ptr + out_base + 3 * out_stride_i + h_offsets * out_stride_h,
         acc3.to(tl.bfloat16),
@@ -200,7 +197,6 @@ def mhc_post(
         out.stride(1),
         out.stride(2),
         H=H,
-        HC=hc,
         BLOCK_H=BLOCK_H,
     )
     return out

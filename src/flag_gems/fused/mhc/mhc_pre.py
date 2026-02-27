@@ -278,20 +278,20 @@ def mhc_pre_fused_kernel(
         cs2 = cm_02 + cm_12 + cm_22 + cm_32
         cs3 = cm_03 + cm_13 + cm_23 + cm_33
         cm_00 /= cs0 + hc_sinkhorn_eps
-        cm_10 /= cs0 + hc_sinkhorn_eps
-        cm_20 /= cs0 + hc_sinkhorn_eps
-        cm_30 /= cs0 + hc_sinkhorn_eps
         cm_01 /= cs1 + hc_sinkhorn_eps
-        cm_11 /= cs1 + hc_sinkhorn_eps
-        cm_21 /= cs1 + hc_sinkhorn_eps
-        cm_31 /= cs1 + hc_sinkhorn_eps
         cm_02 /= cs2 + hc_sinkhorn_eps
-        cm_12 /= cs2 + hc_sinkhorn_eps
-        cm_22 /= cs2 + hc_sinkhorn_eps
-        cm_32 /= cs2 + hc_sinkhorn_eps
         cm_03 /= cs3 + hc_sinkhorn_eps
+        cm_10 /= cs0 + hc_sinkhorn_eps
+        cm_11 /= cs1 + hc_sinkhorn_eps
+        cm_12 /= cs2 + hc_sinkhorn_eps
         cm_13 /= cs3 + hc_sinkhorn_eps
+        cm_20 /= cs0 + hc_sinkhorn_eps
+        cm_21 /= cs1 + hc_sinkhorn_eps
+        cm_22 /= cs2 + hc_sinkhorn_eps
         cm_23 /= cs3 + hc_sinkhorn_eps
+        cm_30 /= cs0 + hc_sinkhorn_eps
+        cm_31 /= cs1 + hc_sinkhorn_eps
+        cm_32 /= cs2 + hc_sinkhorn_eps
         cm_33 /= cs3 + hc_sinkhorn_eps
 
     co = pid_n * 16
@@ -354,7 +354,6 @@ def mhc_pre(
     hc_sinkhorn_eps: float,
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
-    n_splits: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Optimized mHC pre block.
