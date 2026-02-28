@@ -8,6 +8,7 @@ Key optimizations:
 """
 
 import logging
+import weakref
 
 import torch
 import triton
@@ -16,8 +17,27 @@ import triton.language as tl
 logger = logging.getLogger(__name__)
 
 
+_FN_BF16_CACHE: weakref.WeakKeyDictionary[torch.Tensor, tuple[int, torch.Tensor]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_fn_bf16_cached(fn: torch.Tensor) -> torch.Tensor:
+    if fn.requires_grad or torch.is_grad_enabled():
+        return fn.to(dtype=torch.bfloat16)
+    version = fn._version
+    cached = _FN_BF16_CACHE.get(fn)
+    if cached is not None:
+        cached_version, cached_bf16 = cached
+        if cached_version == version:
+            return cached_bf16
+    fn_bf16 = fn.to(dtype=torch.bfloat16)
+    _FN_BF16_CACHE[fn] = (version, fn_bf16)
+    return fn_bf16
+
+
 @triton.jit
-def mhc_pre_fused_kernel(
+def _mhc_pre_fused_kernel_impl(
     gemm_out_ptr,  # (num_tokens, hc_mult3), float32
     hc_scale_ptr,  # (3,), float32
     hc_base_ptr,  # (hc_mult3,), float32
@@ -26,6 +46,7 @@ def mhc_pre_fused_kernel(
     comb_mix_ptr,  # (num_tokens, hc_mult*hc_mult), float32
     layer_input_ptr,  # (num_tokens, hidden_size), bfloat16
     num_tokens,
+    num_tokens_bucket,
     res_stride_n,
     res_stride_i,
     res_stride_h,
@@ -192,10 +213,11 @@ def mhc_pre_fused_kernel(
     cm_02 = tl.exp(cm_02 - rm)
     cm_03 = tl.exp(cm_03 - rm)
     rs = cm_00 + cm_01 + cm_02 + cm_03
-    cm_00 = cm_00 / rs + hc_sinkhorn_eps
-    cm_01 = cm_01 / rs + hc_sinkhorn_eps
-    cm_02 = cm_02 / rs + hc_sinkhorn_eps
-    cm_03 = cm_03 / rs + hc_sinkhorn_eps
+    inv_rs = 1.0 / rs
+    cm_00 = cm_00 * inv_rs + hc_sinkhorn_eps
+    cm_01 = cm_01 * inv_rs + hc_sinkhorn_eps
+    cm_02 = cm_02 * inv_rs + hc_sinkhorn_eps
+    cm_03 = cm_03 * inv_rs + hc_sinkhorn_eps
 
     rm = tl.maximum(tl.maximum(cm_10, cm_11), tl.maximum(cm_12, cm_13))
     cm_10 = tl.exp(cm_10 - rm)
@@ -203,10 +225,11 @@ def mhc_pre_fused_kernel(
     cm_12 = tl.exp(cm_12 - rm)
     cm_13 = tl.exp(cm_13 - rm)
     rs = cm_10 + cm_11 + cm_12 + cm_13
-    cm_10 = cm_10 / rs + hc_sinkhorn_eps
-    cm_11 = cm_11 / rs + hc_sinkhorn_eps
-    cm_12 = cm_12 / rs + hc_sinkhorn_eps
-    cm_13 = cm_13 / rs + hc_sinkhorn_eps
+    inv_rs = 1.0 / rs
+    cm_10 = cm_10 * inv_rs + hc_sinkhorn_eps
+    cm_11 = cm_11 * inv_rs + hc_sinkhorn_eps
+    cm_12 = cm_12 * inv_rs + hc_sinkhorn_eps
+    cm_13 = cm_13 * inv_rs + hc_sinkhorn_eps
 
     rm = tl.maximum(tl.maximum(cm_20, cm_21), tl.maximum(cm_22, cm_23))
     cm_20 = tl.exp(cm_20 - rm)
@@ -214,10 +237,11 @@ def mhc_pre_fused_kernel(
     cm_22 = tl.exp(cm_22 - rm)
     cm_23 = tl.exp(cm_23 - rm)
     rs = cm_20 + cm_21 + cm_22 + cm_23
-    cm_20 = cm_20 / rs + hc_sinkhorn_eps
-    cm_21 = cm_21 / rs + hc_sinkhorn_eps
-    cm_22 = cm_22 / rs + hc_sinkhorn_eps
-    cm_23 = cm_23 / rs + hc_sinkhorn_eps
+    inv_rs = 1.0 / rs
+    cm_20 = cm_20 * inv_rs + hc_sinkhorn_eps
+    cm_21 = cm_21 * inv_rs + hc_sinkhorn_eps
+    cm_22 = cm_22 * inv_rs + hc_sinkhorn_eps
+    cm_23 = cm_23 * inv_rs + hc_sinkhorn_eps
 
     rm = tl.maximum(tl.maximum(cm_30, cm_31), tl.maximum(cm_32, cm_33))
     cm_30 = tl.exp(cm_30 - rm)
@@ -225,73 +249,86 @@ def mhc_pre_fused_kernel(
     cm_32 = tl.exp(cm_32 - rm)
     cm_33 = tl.exp(cm_33 - rm)
     rs = cm_30 + cm_31 + cm_32 + cm_33
-    cm_30 = cm_30 / rs + hc_sinkhorn_eps
-    cm_31 = cm_31 / rs + hc_sinkhorn_eps
-    cm_32 = cm_32 / rs + hc_sinkhorn_eps
-    cm_33 = cm_33 / rs + hc_sinkhorn_eps
+    inv_rs = 1.0 / rs
+    cm_30 = cm_30 * inv_rs + hc_sinkhorn_eps
+    cm_31 = cm_31 * inv_rs + hc_sinkhorn_eps
+    cm_32 = cm_32 * inv_rs + hc_sinkhorn_eps
+    cm_33 = cm_33 * inv_rs + hc_sinkhorn_eps
 
     cs0 = cm_00 + cm_10 + cm_20 + cm_30
     cs1 = cm_01 + cm_11 + cm_21 + cm_31
     cs2 = cm_02 + cm_12 + cm_22 + cm_32
     cs3 = cm_03 + cm_13 + cm_23 + cm_33
-    cm_00 /= cs0 + hc_sinkhorn_eps
-    cm_10 /= cs0 + hc_sinkhorn_eps
-    cm_20 /= cs0 + hc_sinkhorn_eps
-    cm_30 /= cs0 + hc_sinkhorn_eps
-    cm_01 /= cs1 + hc_sinkhorn_eps
-    cm_11 /= cs1 + hc_sinkhorn_eps
-    cm_21 /= cs1 + hc_sinkhorn_eps
-    cm_31 /= cs1 + hc_sinkhorn_eps
-    cm_02 /= cs2 + hc_sinkhorn_eps
-    cm_12 /= cs2 + hc_sinkhorn_eps
-    cm_22 /= cs2 + hc_sinkhorn_eps
-    cm_32 /= cs2 + hc_sinkhorn_eps
-    cm_03 /= cs3 + hc_sinkhorn_eps
-    cm_13 /= cs3 + hc_sinkhorn_eps
-    cm_23 /= cs3 + hc_sinkhorn_eps
-    cm_33 /= cs3 + hc_sinkhorn_eps
+    inv_cs0 = 1.0 / (cs0 + hc_sinkhorn_eps)
+    inv_cs1 = 1.0 / (cs1 + hc_sinkhorn_eps)
+    inv_cs2 = 1.0 / (cs2 + hc_sinkhorn_eps)
+    inv_cs3 = 1.0 / (cs3 + hc_sinkhorn_eps)
+    cm_00 *= inv_cs0
+    cm_10 *= inv_cs0
+    cm_20 *= inv_cs0
+    cm_30 *= inv_cs0
+    cm_01 *= inv_cs1
+    cm_11 *= inv_cs1
+    cm_21 *= inv_cs1
+    cm_31 *= inv_cs1
+    cm_02 *= inv_cs2
+    cm_12 *= inv_cs2
+    cm_22 *= inv_cs2
+    cm_32 *= inv_cs2
+    cm_03 *= inv_cs3
+    cm_13 *= inv_cs3
+    cm_23 *= inv_cs3
+    cm_33 *= inv_cs3
 
     for _ in tl.static_range(sinkhorn_repeat - 1):
         rs0 = cm_00 + cm_01 + cm_02 + cm_03
         rs1 = cm_10 + cm_11 + cm_12 + cm_13
         rs2 = cm_20 + cm_21 + cm_22 + cm_23
         rs3 = cm_30 + cm_31 + cm_32 + cm_33
-        cm_00 /= rs0 + hc_sinkhorn_eps
-        cm_01 /= rs0 + hc_sinkhorn_eps
-        cm_02 /= rs0 + hc_sinkhorn_eps
-        cm_03 /= rs0 + hc_sinkhorn_eps
-        cm_10 /= rs1 + hc_sinkhorn_eps
-        cm_11 /= rs1 + hc_sinkhorn_eps
-        cm_12 /= rs1 + hc_sinkhorn_eps
-        cm_13 /= rs1 + hc_sinkhorn_eps
-        cm_20 /= rs2 + hc_sinkhorn_eps
-        cm_21 /= rs2 + hc_sinkhorn_eps
-        cm_22 /= rs2 + hc_sinkhorn_eps
-        cm_23 /= rs2 + hc_sinkhorn_eps
-        cm_30 /= rs3 + hc_sinkhorn_eps
-        cm_31 /= rs3 + hc_sinkhorn_eps
-        cm_32 /= rs3 + hc_sinkhorn_eps
-        cm_33 /= rs3 + hc_sinkhorn_eps
+        inv_rs0 = 1.0 / (rs0 + hc_sinkhorn_eps)
+        inv_rs1 = 1.0 / (rs1 + hc_sinkhorn_eps)
+        inv_rs2 = 1.0 / (rs2 + hc_sinkhorn_eps)
+        inv_rs3 = 1.0 / (rs3 + hc_sinkhorn_eps)
+        cm_00 *= inv_rs0
+        cm_01 *= inv_rs0
+        cm_02 *= inv_rs0
+        cm_03 *= inv_rs0
+        cm_10 *= inv_rs1
+        cm_11 *= inv_rs1
+        cm_12 *= inv_rs1
+        cm_13 *= inv_rs1
+        cm_20 *= inv_rs2
+        cm_21 *= inv_rs2
+        cm_22 *= inv_rs2
+        cm_23 *= inv_rs2
+        cm_30 *= inv_rs3
+        cm_31 *= inv_rs3
+        cm_32 *= inv_rs3
+        cm_33 *= inv_rs3
         cs0 = cm_00 + cm_10 + cm_20 + cm_30
         cs1 = cm_01 + cm_11 + cm_21 + cm_31
         cs2 = cm_02 + cm_12 + cm_22 + cm_32
         cs3 = cm_03 + cm_13 + cm_23 + cm_33
-        cm_00 /= cs0 + hc_sinkhorn_eps
-        cm_01 /= cs1 + hc_sinkhorn_eps
-        cm_02 /= cs2 + hc_sinkhorn_eps
-        cm_03 /= cs3 + hc_sinkhorn_eps
-        cm_10 /= cs0 + hc_sinkhorn_eps
-        cm_11 /= cs1 + hc_sinkhorn_eps
-        cm_12 /= cs2 + hc_sinkhorn_eps
-        cm_13 /= cs3 + hc_sinkhorn_eps
-        cm_20 /= cs0 + hc_sinkhorn_eps
-        cm_21 /= cs1 + hc_sinkhorn_eps
-        cm_22 /= cs2 + hc_sinkhorn_eps
-        cm_23 /= cs3 + hc_sinkhorn_eps
-        cm_30 /= cs0 + hc_sinkhorn_eps
-        cm_31 /= cs1 + hc_sinkhorn_eps
-        cm_32 /= cs2 + hc_sinkhorn_eps
-        cm_33 /= cs3 + hc_sinkhorn_eps
+        inv_cs0 = 1.0 / (cs0 + hc_sinkhorn_eps)
+        inv_cs1 = 1.0 / (cs1 + hc_sinkhorn_eps)
+        inv_cs2 = 1.0 / (cs2 + hc_sinkhorn_eps)
+        inv_cs3 = 1.0 / (cs3 + hc_sinkhorn_eps)
+        cm_00 *= inv_cs0
+        cm_01 *= inv_cs1
+        cm_02 *= inv_cs2
+        cm_03 *= inv_cs3
+        cm_10 *= inv_cs0
+        cm_11 *= inv_cs1
+        cm_12 *= inv_cs2
+        cm_13 *= inv_cs3
+        cm_20 *= inv_cs0
+        cm_21 *= inv_cs1
+        cm_22 *= inv_cs2
+        cm_23 *= inv_cs3
+        cm_30 *= inv_cs0
+        cm_31 *= inv_cs1
+        cm_32 *= inv_cs2
+        cm_33 *= inv_cs3
 
     co = pid_n * 16
     tl.store(comb_mix_ptr + co + 0, cm_00)
@@ -325,6 +362,7 @@ def mhc_pre_fused_kernel(
             mask=h_mask,
             other=0.0,
         ).to(tl.float32)
+        acc = pre_mix_0 * r0 + pre_mix_1 * r1
         r2 = tl.load(
             residual_ptr + res_base + 2 * res_stride_i + h_offsets * res_stride_h,
             mask=h_mask,
@@ -335,12 +373,80 @@ def mhc_pre_fused_kernel(
             mask=h_mask,
             other=0.0,
         ).to(tl.float32)
-        acc = pre_mix_0 * r0 + pre_mix_1 * r1 + pre_mix_2 * r2 + pre_mix_3 * r3
+        acc += pre_mix_2 * r2 + pre_mix_3 * r3
         tl.store(
             layer_input_ptr + pid_n * li_stride_n + h_offsets * li_stride_h,
             acc.to(tl.bfloat16),
             mask=h_mask,
         )
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_H": 256}, num_warps=4, num_stages=1),
+        triton.Config({"BLOCK_H": 256}, num_warps=8, num_stages=1),
+        triton.Config({"BLOCK_H": 512}, num_warps=4, num_stages=1),
+        triton.Config({"BLOCK_H": 512}, num_warps=8, num_stages=1),
+        triton.Config({"BLOCK_H": 1024}, num_warps=4, num_stages=1),
+        triton.Config({"BLOCK_H": 1024}, num_warps=8, num_stages=1),
+        triton.Config({"BLOCK_H": 1024}, num_warps=16, num_stages=1),
+        triton.Config({"BLOCK_H": 256}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_H": 512}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_H": 512}, num_warps=8, num_stages=2),
+    ],
+    key=["hidden_size", "num_tokens_bucket"],
+)
+@triton.jit
+def mhc_pre_fused_kernel(
+    gemm_out_ptr,  # (num_tokens, hc_mult3), float32
+    hc_scale_ptr,  # (3,), float32
+    hc_base_ptr,  # (hc_mult3,), float32
+    residual_ptr,  # (num_tokens, hc_mult, hidden_size), bfloat16
+    post_mix_ptr,  # (num_tokens, hc_mult), float32
+    comb_mix_ptr,  # (num_tokens, hc_mult*hc_mult), float32
+    layer_input_ptr,  # (num_tokens, hidden_size), bfloat16
+    num_tokens,
+    num_tokens_bucket,
+    res_stride_n,
+    res_stride_i,
+    res_stride_h,
+    li_stride_n,
+    li_stride_h,
+    hidden_size,
+    hc_hidden_size,
+    rms_eps: tl.constexpr,
+    hc_pre_eps: tl.constexpr,
+    hc_sinkhorn_eps: tl.constexpr,
+    hc_post_mult_value: tl.constexpr,
+    sinkhorn_repeat: tl.constexpr,
+    HC_MULT3: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    _mhc_pre_fused_kernel_impl(
+        gemm_out_ptr,
+        hc_scale_ptr,
+        hc_base_ptr,
+        residual_ptr,
+        post_mix_ptr,
+        comb_mix_ptr,
+        layer_input_ptr,
+        num_tokens,
+        num_tokens_bucket,
+        res_stride_n,
+        res_stride_i,
+        res_stride_h,
+        li_stride_n,
+        li_stride_h,
+        hidden_size,
+        hc_hidden_size,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        HC_MULT3,
+        BLOCK_H,
+    )
 
 
 def mhc_pre(
@@ -375,10 +481,21 @@ def mhc_pre(
     residual_flat = residual.reshape(-1, hc_mult, hidden_size).contiguous()
     num_tokens = residual_flat.shape[0]
     device = residual.device
+    if num_tokens <= 512:
+        num_tokens_bucket = 1
+    elif num_tokens <= 1024:
+        num_tokens_bucket = 2
+    elif num_tokens <= 2048:
+        num_tokens_bucket = 3
+    elif num_tokens <= 4096:
+        num_tokens_bucket = 4
+    else:
+        num_tokens_bucket = 5
 
     # ── Step 1: GEMM via cuBLAS (bf16 tensor cores) ──
     x_flat = residual_flat.reshape(num_tokens, hc_hidden_size)
-    gemm_out = torch.mm(x_flat, fn.bfloat16().t()).float()
+    fn_bf16 = _get_fn_bf16_cached(fn)
+    gemm_out = torch.mm(x_flat, fn_bf16.t()).float()
 
     # ── Step 2: Fused sqrsum + norm + mix + sinkhorn + weighted sum ──
     post_mix = torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=device)
@@ -389,7 +506,6 @@ def mhc_pre(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=device
     )
 
-    BLOCK_H = min(triton.next_power_of_2(hidden_size), 1024)
     mhc_pre_fused_kernel[(num_tokens,)](
         gemm_out,
         hc_scale,
@@ -399,6 +515,7 @@ def mhc_pre(
         comb_mix,
         layer_input,
         num_tokens,
+        num_tokens_bucket,
         residual_flat.stride(0),
         residual_flat.stride(1),
         residual_flat.stride(2),
@@ -412,7 +529,6 @@ def mhc_pre(
         hc_post_mult_value=hc_post_mult_value,
         sinkhorn_repeat=sinkhorn_repeat,
         HC_MULT3=hc_mult3,
-        BLOCK_H=BLOCK_H,
     )
 
     post_mix = post_mix.view(*outer_shape, hc_mult, 1)
