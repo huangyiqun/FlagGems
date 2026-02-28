@@ -353,6 +353,7 @@ def mhc_pre(
     hc_sinkhorn_eps: float,
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
+    n_splits: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Optimized mHC pre block.
