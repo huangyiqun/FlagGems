@@ -108,6 +108,7 @@ def mhc_pre_fused_kernel(
         )
         * hc_post_mult_value
     )
+    tl.store(post_mix_ptr + pid_n * 4 + 0, post_0)
     post_1 = (
         tl.sigmoid(
             tl.load(gemm_out_ptr + go_base + 5) * rms_inv * scale_1
@@ -115,6 +116,7 @@ def mhc_pre_fused_kernel(
         )
         * hc_post_mult_value
     )
+    tl.store(post_mix_ptr + pid_n * 4 + 1, post_1)
     post_2 = (
         tl.sigmoid(
             tl.load(gemm_out_ptr + go_base + 6) * rms_inv * scale_1
@@ -122,6 +124,7 @@ def mhc_pre_fused_kernel(
         )
         * hc_post_mult_value
     )
+    tl.store(post_mix_ptr + pid_n * 4 + 2, post_2)
     post_3 = (
         tl.sigmoid(
             tl.load(gemm_out_ptr + go_base + 7) * rms_inv * scale_1
@@ -129,10 +132,6 @@ def mhc_pre_fused_kernel(
         )
         * hc_post_mult_value
     )
-
-    tl.store(post_mix_ptr + pid_n * 4 + 0, post_0)
-    tl.store(post_mix_ptr + pid_n * 4 + 1, post_1)
-    tl.store(post_mix_ptr + pid_n * 4 + 2, post_2)
     tl.store(post_mix_ptr + pid_n * 4 + 3, post_3)
 
     # ══ comb_mix: indices 8..23 → 4x4 Sinkhorn ══
