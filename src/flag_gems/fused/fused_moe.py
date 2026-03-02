@@ -212,12 +212,11 @@ def fused_moe_kernel(
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
                 accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
-                if use_fp8_w8a8:
-                    accumulator = tl.dot(a, b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(a, b)
+                accumulator = tl.dot(a, b, acc=accumulator)
         else:
-            accumulator += tl.dot(a, b)
+            # Fused dot-accumulate: on SM90 this maps to WGMMA with
+            # in-place accumulation, avoiding a separate add instruction.
+            accumulator = tl.dot(a, b, acc=accumulator)
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -276,13 +275,40 @@ def get_default_config(
         else:
             block_m = 128
 
-        block_n = 64 if M <= 64 else 128
-        block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
+        # --- Tile sizing optimised for H100/H800 SM90 GPUs ---
+        # Larger N/K tiles improve compute intensity and reduce grid
+        # launches for the common case where N is large (e.g. 14336).
+        if N >= 4096:
+            block_n = 128 if M <= 128 else 256
+        elif N >= 1024:
+            block_n = 64 if M <= 64 else 128
+        else:
+            block_n = 64 if M <= 64 else 128
 
-        tokens_per_expert = M // max(E, 1)
-        group_m = 16 if tokens_per_expert > 128 else 1
-        num_warps = 4 if M <= 128 else 8
-        num_stages = 4 if M <= 32 else 3
+        # K-tile: 128 gives better arithmetic intensity.
+        if dtype == "fp8_w8a8":
+            block_k = 128
+        elif K >= 4096 or M <= 64:
+            block_k = 128
+        else:
+            block_k = 64
+
+        # Group-M: promotes L2 reuse across M-blocks.
+        tokens_per_expert = (M * topk) // max(E, 1)
+        if tokens_per_expert > 128:
+            group_m = 16
+        elif tokens_per_expert > 32:
+            group_m = 8
+        else:
+            group_m = 1
+
+        num_warps = 4 if block_m * block_n < 8192 else 8
+        num_stages = 3
+
+        # Shared-memory guard (~232 KB on H100/H800).
+        smem_per_stage = (block_m * block_k + block_k * block_n) * 2
+        while num_stages > 2 and smem_per_stage * num_stages > 200_000:
+            num_stages -= 1
 
         config = {
             "BLOCK_SIZE_M": block_m,
