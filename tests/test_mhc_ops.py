@@ -11,9 +11,9 @@ from itertools import product
 import pytest
 import torch
 
+from flag_gems.fused.mhc.mhc_bwd import mhc_bwd, mhc_bwd_ref, sinkhorn_forward
 from flag_gems.fused.mhc.mhc_post import mhc_post, mhc_post_ref
 from flag_gems.fused.mhc.mhc_pre import mhc_pre, mhc_pre_ref
-from flag_gems.fused.mhc.mhc_bwd import mhc_bwd, mhc_bwd_ref, sinkhorn_forward
 
 # ─── Import TileLang versions for comparison ───
 sys.path.insert(0, "/workspace/tilelang/examples/deepseek_mhc")
@@ -38,11 +38,6 @@ except ImportError:
     set_autotune_inputs = None
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Test data generators
-# ═══════════════════════════════════════════════════════════════
-
-
 def generate_mhc_post_data(n: int, h: int, hc_mult: int = 4, device: str = "cuda"):
     torch.manual_seed(42)
     x = torch.randn((n, h), dtype=torch.bfloat16, device=device)
@@ -54,6 +49,48 @@ def generate_mhc_post_data(n: int, h: int, hc_mult: int = 4, device: str = "cuda
     return dict(
         x=x, residual=residual, post_layer_mix=post_layer_mix, comb_res_mix=comb_res_mix
     )
+
+
+MHC_POST_CONFIGS = list(
+    product(
+        [4096],  # n (num_tokens)
+        [1280, 2560, 7168],  # h (hidden_size)
+    )
+)
+
+
+@pytest.mark.mhc_post
+@pytest.mark.parametrize(
+    "n, h", MHC_POST_CONFIGS, ids=[f"n{n}_h{h}" for n, h in MHC_POST_CONFIGS]
+)
+def test_mhc_post_vs_ref(n, h):
+    """Test Triton mhc_post against PyTorch reference."""
+    data = generate_mhc_post_data(n, h)
+    out_triton = mhc_post(**data)
+    out_ref = mhc_post_ref(**data)
+    torch.testing.assert_close(out_triton, out_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.mhc_post
+@pytest.mark.skipif(not HAS_TILELANG, reason="TileLang not available")
+@pytest.mark.parametrize(
+    "n, h", MHC_POST_CONFIGS, ids=[f"n{n}_h{h}" for n, h in MHC_POST_CONFIGS]
+)
+def test_mhc_post_vs_tilelang(n, h):
+    """Test Triton mhc_post against TileLang implementation."""
+    data = generate_mhc_post_data(n, h)
+    out_triton = mhc_post(**data)
+    out_tl = mhc_post_tl(**data)
+    torch.testing.assert_close(out_triton, out_tl, rtol=1e-2, atol=1e-2)
+
+
+MHC_PRE_CONFIGS = list(
+    product(
+        [512, 1024, 2048, 8192],  # n
+        [1280, 2560, 4096],  # hidden_size
+        [4],  # hc_mult
+    )
+)
 
 
 def generate_mhc_pre_data(
@@ -96,56 +133,6 @@ def generate_mhc_pre_data(
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-#  mhc_post tests
-# ═══════════════════════════════════════════════════════════════
-
-MHC_POST_CONFIGS = list(
-    product(
-        [4096],  # n (num_tokens)
-        [1280, 2560, 7168],  # h (hidden_size)
-    )
-)
-
-
-@pytest.mark.mhc_post
-@pytest.mark.parametrize(
-    "n, h", MHC_POST_CONFIGS, ids=[f"n{n}_h{h}" for n, h in MHC_POST_CONFIGS]
-)
-def test_mhc_post_vs_ref(n, h):
-    """Test Triton mhc_post against PyTorch reference."""
-    data = generate_mhc_post_data(n, h)
-    out_triton = mhc_post(**data)
-    out_ref = mhc_post_ref(**data)
-    torch.testing.assert_close(out_triton, out_ref, rtol=1e-2, atol=1e-2)
-
-
-@pytest.mark.mhc_post
-@pytest.mark.skipif(not HAS_TILELANG, reason="TileLang not available")
-@pytest.mark.parametrize(
-    "n, h", MHC_POST_CONFIGS, ids=[f"n{n}_h{h}" for n, h in MHC_POST_CONFIGS]
-)
-def test_mhc_post_vs_tilelang(n, h):
-    """Test Triton mhc_post against TileLang implementation."""
-    data = generate_mhc_post_data(n, h)
-    out_triton = mhc_post(**data)
-    out_tl = mhc_post_tl(**data)
-    torch.testing.assert_close(out_triton, out_tl, rtol=1e-2, atol=1e-2)
-
-
-# ═══════════════════════════════════════════════════════════════
-#  mhc_pre tests
-# ═══════════════════════════════════════════════════════════════
-
-MHC_PRE_CONFIGS = list(
-    product(
-        [512, 1024, 2048, 8192],  # n
-        [1280, 2560, 4096],  # hidden_size
-        [4],  # hc_mult
-    )
-)
-
-
 @pytest.mark.mhc_pre
 @pytest.mark.parametrize(
     "n, hidden_size, hc_mult",
@@ -180,10 +167,6 @@ def test_mhc_pre_vs_tilelang(n, hidden_size, hc_mult):
     torch.testing.assert_close(comb_triton, comb_tl, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(li_triton, li_tl, rtol=1e-2, atol=1e-2)
 
-
-# ═══════════════════════════════════════════════════════════════
-#  mhc_bwd tests (Sinkhorn backward via implicit CG)
-# ═══════════════════════════════════════════════════════════════
 
 MHC_BWD_CONFIGS = list(
     product(

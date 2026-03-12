@@ -10,9 +10,9 @@ import sys
 import pytest
 import torch
 
+from flag_gems.fused.mhc.mhc_bwd import mhc_bwd, mhc_bwd_ref, sinkhorn_forward
 from flag_gems.fused.mhc.mhc_post import mhc_post, mhc_post_ref
 from flag_gems.fused.mhc.mhc_pre import mhc_pre, mhc_pre_ref
-from flag_gems.fused.mhc.mhc_bwd import mhc_bwd, mhc_bwd_ref, sinkhorn_forward
 
 from .performance_utils import Benchmark
 
@@ -37,11 +37,6 @@ except ImportError:
     HAS_TILELANG_BWD = False
     sinkhorn_bwd_tl_factory = None
     set_autotune_inputs = None
-
-
-# ═══════════════════════════════════════════════════════════════
-#  mhc_post benchmark
-# ═══════════════════════════════════════════════════════════════
 
 
 class MHCPostBenchmark(Benchmark):
@@ -91,11 +86,6 @@ def test_perf_mhc_post_vs_tilelang():
     )
     bench.set_gems(mhc_post)
     bench.run()
-
-
-# ═══════════════════════════════════════════════════════════════
-#  mhc_pre benchmark
-# ═══════════════════════════════════════════════════════════════
 
 
 class MHCPreBenchmark(Benchmark):
@@ -178,11 +168,6 @@ def test_perf_mhc_pre_vs_tilelang():
     )
     bench.set_gems(mhc_pre)
     bench.run()
-
-
-# ═══════════════════════════════════════════════════════════════
-#  mhc_bwd benchmark (Sinkhorn backward via implicit CG)
-# ═══════════════════════════════════════════════════════════════
 
 
 class MHCBwdBenchmark(Benchmark):

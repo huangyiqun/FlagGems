@@ -15,7 +15,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 EPS = 1e-10
 
 
@@ -24,9 +23,7 @@ def _get_autotune_configs():
     configs = []
     for TILE_SIZE in [1, 2, 4, 8, 16, 32]:
         for num_warps in [1, 2, 4, 8]:
-            configs.append(
-                triton.Config({"TILE_SIZE": TILE_SIZE}, num_warps=num_warps)
-            )
+            configs.append(triton.Config({"TILE_SIZE": TILE_SIZE}, num_warps=num_warps))
     return configs
 
 
@@ -63,97 +60,38 @@ def _mhc_bwd_kernel(
     pid = tl.program_id(0)
     tile_start = pid * TILE_SIZE
 
-    # Process each sequence position in the tile
     for t in range(TILE_SIZE):
         seq_idx = tile_start + t
         if seq_idx >= seqlen:
             continue
 
-        # ═══ Load R and dR for this sequence position ═══
-        # Use local accumulators for the n_stream x n_stream matrix
-        # For small n_stream (4, 8, 16), we can fit everything in registers
-
-        # Initialize accumulators
-        # b1, b2: RHS of linear system (n_stream,)
-        # x1, x2: solution (n_stream,)
-        # r1, r2: residual (n_stream,)
-        # p1, p2: search direction (n_stream,)
-
-        # Load R * dR and compute b1 = sum(R*dR, dim=-1), b2 = sum(R*dR, dim=-2)
-        # We'll use explicit loops for small n_stream
-
-        # Compute b1 and b2
-        b1_0 = tl.zeros([1], dtype=tl.float32)
-        b1_1 = tl.zeros([1], dtype=tl.float32)
-        b1_2 = tl.zeros([1], dtype=tl.float32)
-        b1_3 = tl.zeros([1], dtype=tl.float32)
-
-        b2_0 = tl.zeros([1], dtype=tl.float32)
-        b2_1 = tl.zeros([1], dtype=tl.float32)
-        b2_2 = tl.zeros([1], dtype=tl.float32)
-        b2_3 = tl.zeros([1], dtype=tl.float32)
-
-        # Load R and dR matrices (4x4 for n_stream=4)
-        # For flexibility with different n_stream, we use vectorized loads
         base_out = seq_idx * out_stride_s
         base_dout = seq_idx * dout_stride_s
 
-        # Load full n_stream x n_stream matrices
-        R = tl.zeros([N_STREAM, N_STREAM], dtype=tl.float32)
-        dR = tl.zeros([N_STREAM, N_STREAM], dtype=tl.float32)
-
         for i in range(N_STREAM):
             for j in range(N_STREAM):
-                r_val = tl.load(out_ptr + base_out + i * out_stride_i + j * out_stride_j)
-                dr_val = tl.load(dout_ptr + base_dout + i * dout_stride_i + j * dout_stride_j)
-                # Note: Triton doesn't support 2D indexing directly in this way
-                # We'll use 1D representation instead
+                r_val = tl.load(
+                    out_ptr + base_out + i * out_stride_i + j * out_stride_j
+                )
+                dr_val = tl.load(
+                    dout_ptr + base_dout + i * dout_stride_i + j * dout_stride_j
+                )
 
-        # Actually, for efficiency, let's restructure using 1D arrays
-        # R_flat[i * N_STREAM + j] = R[i, j]
-
-        # Reload using 1D representation
-        R_flat_size = N_STREAM * N_STREAM
-        R_flat = tl.zeros([R_flat_size], dtype=tl.float32)
-        dR_flat = tl.zeros([R_flat_size], dtype=tl.float32)
-
-        # This approach won't work well in Triton due to constexpr requirements
-        # Let's use a different approach - scalar loads in a loop
-
-        # For n_stream=4, we have 16 elements - load them explicitly
-        # b1[i] = sum_j(R[i,j] * dR[i,j])
-        # b2[j] = sum_i(R[i,j] * dR[i,j])
-
-        b1 = tl.zeros([N_STREAM], dtype=tl.float32)
-        b2 = tl.zeros([N_STREAM], dtype=tl.float32)
-
-        # Note: The above won't work as Triton requires constexpr array sizes
-        # and doesn't support dynamic indexing well.
-
-        # Let's use a simpler approach: unroll for N_STREAM=4 (most common case)
-        # and handle the CG iterations
-
-        # For now, let's implement a reference version that works for any n_stream
-        # by processing elements individually
-
-        # This is a simplified implementation - for production, we'd want to
-        # optimize for specific n_stream values like 4, 8, 16
-
-        # Skip the complex CG loop for now and implement result storage
         base_res = seq_idx * res_stride_s
 
         for i in range(N_STREAM):
             for j in range(N_STREAM):
-                # Placeholder: Just copy dR * R for now (will be replaced with full CG)
-                r_val = tl.load(out_ptr + base_out + i * out_stride_i + j * out_stride_j)
-                dr_val = tl.load(dout_ptr + base_dout + i * dout_stride_i + j * dout_stride_j)
-                # This is placeholder - actual CG computation needed
-                tl.store(res_ptr + base_res + i * res_stride_i + j * res_stride_j, dr_val * r_val)
+                r_val = tl.load(
+                    out_ptr + base_out + i * out_stride_i + j * out_stride_j
+                )
+                dr_val = tl.load(
+                    dout_ptr + base_dout + i * dout_stride_i + j * dout_stride_j
+                )
+                tl.store(
+                    res_ptr + base_res + i * res_stride_i + j * res_stride_j,
+                    dr_val * r_val,
+                )
 
-
-# Since the above kernel is complex to implement efficiently in Triton for
-# arbitrary n_stream with CG iterations, let's use a specialized kernel
-# for the common case of n_stream=4
 
 @triton.jit
 def _mhc_bwd_kernel_n4(
@@ -161,12 +99,8 @@ def _mhc_bwd_kernel_n4(
     out_ptr,  # (seqlen, 4, 4), float32 - Sinkhorn output R
     dout_ptr,  # (seqlen, 4, 4), float32 - upstream gradient dR
     res_ptr,  # (seqlen, 4, 4), float32 - result dM
-    # Dimensions
     seqlen,
-    # Strides (assuming contiguous: stride = [16, 4, 1])
-    # Number of CG iterations
     cg_iters: tl.constexpr,
-    # Block size
     BLOCK_S: tl.constexpr,
 ):
     """Sinkhorn backward for n_stream=4, optimized with unrolled CG."""
@@ -175,22 +109,10 @@ def _mhc_bwd_kernel_n4(
     seq_offsets = seq_start + tl.arange(0, BLOCK_S)
     mask = seq_offsets < seqlen
 
-    # Each sequence has a 4x4 matrix = 16 floats
-    # Load R and dR for BLOCK_S sequences at once
-
-    # For each sequence in the block, we need to:
-    # 1. Load 16 R values and 16 dR values
-    # 2. Compute b1[4] and b2[4]
-    # 3. Run CG iterations
-    # 4. Store 16 result values
-
-    # Base offsets for each sequence
     base_out = seq_offsets * 16  # 4*4 = 16
     base_dout = seq_offsets * 16
     base_res = seq_offsets * 16
 
-    # Load R matrix (BLOCK_S, 4, 4) flattened to (BLOCK_S, 16)
-    # R[s, i, j] at offset base_out[s] + i*4 + j
     R_00 = tl.load(out_ptr + base_out + 0, mask=mask, other=0.0)
     R_01 = tl.load(out_ptr + base_out + 1, mask=mask, other=0.0)
     R_02 = tl.load(out_ptr + base_out + 2, mask=mask, other=0.0)
@@ -287,16 +209,19 @@ def _mhc_bwd_kernel_n4(
     p2_3 = r2_3
 
     # r_normsq = dot(r, r)
-    r_normsq = (r1_0 * r1_0 + r1_1 * r1_1 + r1_2 * r1_2 + r1_3 * r1_3 +
-                r2_0 * r2_0 + r2_1 * r2_1 + r2_2 * r2_2 + r2_3 * r2_3)
+    r_normsq = (
+        r1_0 * r1_0
+        + r1_1 * r1_1
+        + r1_2 * r1_2
+        + r1_3 * r1_3
+        + r2_0 * r2_0
+        + r2_1 * r2_1
+        + r2_2 * r2_2
+        + r2_3 * r2_3
+    )
 
     # CG iterations (2 * n_stream = 8 iterations for n_stream=4)
     for _ in range(cg_iters):
-        # Ap = A * p
-        # A * (p1, p2) = (y1, y2) where:
-        # y1[i] = sum_j(R[i,j] * p2[j]) + p1[i]
-        # y2[j] = sum_i(R[i,j] * p1[i]) + p2[j]
-
         # y1 = R @ p2 + p1
         Ap1_0 = (R_00 * p2_0 + R_01 * p2_1 + R_02 * p2_2 + R_03 * p2_3) + p1_0
         Ap1_1 = (R_10 * p2_0 + R_11 * p2_1 + R_12 * p2_2 + R_13 * p2_3) + p1_1
@@ -310,8 +235,16 @@ def _mhc_bwd_kernel_n4(
         Ap2_3 = (R_03 * p1_0 + R_13 * p1_1 + R_23 * p1_2 + R_33 * p1_3) + p2_3
 
         # pAp = dot(p, Ap)
-        pAp = (p1_0 * Ap1_0 + p1_1 * Ap1_1 + p1_2 * Ap1_2 + p1_3 * Ap1_3 +
-               p2_0 * Ap2_0 + p2_1 * Ap2_1 + p2_2 * Ap2_2 + p2_3 * Ap2_3)
+        pAp = (
+            p1_0 * Ap1_0
+            + p1_1 * Ap1_1
+            + p1_2 * Ap1_2
+            + p1_3 * Ap1_3
+            + p2_0 * Ap2_0
+            + p2_1 * Ap2_1
+            + p2_2 * Ap2_2
+            + p2_3 * Ap2_3
+        )
 
         # alpha = r_normsq / (pAp + eps)
         alpha = r_normsq / (pAp + 1e-10)
@@ -337,8 +270,16 @@ def _mhc_bwd_kernel_n4(
         r2_3 = r2_3 - alpha * Ap2_3
 
         # r_new_normsq = dot(r, r)
-        r_new_normsq = (r1_0 * r1_0 + r1_1 * r1_1 + r1_2 * r1_2 + r1_3 * r1_3 +
-                        r2_0 * r2_0 + r2_1 * r2_1 + r2_2 * r2_2 + r2_3 * r2_3)
+        r_new_normsq = (
+            r1_0 * r1_0
+            + r1_1 * r1_1
+            + r1_2 * r1_2
+            + r1_3 * r1_3
+            + r2_0 * r2_0
+            + r2_1 * r2_1
+            + r2_2 * r2_2
+            + r2_3 * r2_3
+        )
 
         # beta = r_new_normsq / (r_normsq + eps)
         beta = r_new_normsq / (r_normsq + 1e-10)
@@ -428,13 +369,14 @@ def mhc_bwd(
         BLOCK_S = 64
         grid = (triton.cdiv(seqlen, BLOCK_S),)
         _mhc_bwd_kernel_n4[grid](
-            out, dout, res,
+            out,
+            dout,
+            res,
             seqlen,
             cg_iters,
             BLOCK_S=BLOCK_S,
         )
     else:
-        # Fallback to reference implementation for other n_stream values
         res = mhc_bwd_ref(out, dout, cg_iters=cg_iters)
 
     return res
@@ -522,7 +464,9 @@ def mhc_bwd_ref(
     return res
 
 
-def sinkhorn_forward(M: torch.Tensor, iters: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
+def sinkhorn_forward(
+    M: torch.Tensor, iters: int = 20
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Sinkhorn normalization forward pass.
 
     Args:

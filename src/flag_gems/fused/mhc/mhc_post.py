@@ -44,11 +44,11 @@ logger = logging.getLogger(__name__)
 )
 @triton.jit
 def mhc_post_kernel(
-    a_ptr,       # comb_res_mix : (N, 4, 4), float32 — a[n, j, i]
-    b_ptr,       # residual     : (N, 4, H), bfloat16
-    c_ptr,       # post_layer_mix: (N, 4),   float32
-    d_ptr,       # x            : (N, H),    bfloat16
-    out_ptr,     # output       : (N, 4, H), bfloat16
+    a_ptr,  # comb_res_mix : (N, 4, 4), float32 — a[n, j, i]
+    b_ptr,  # residual     : (N, 4, H), bfloat16
+    c_ptr,  # post_layer_mix: (N, 4),   float32
+    d_ptr,  # x            : (N, H),    bfloat16
+    out_ptr,  # output       : (N, 4, H), bfloat16
     H: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
@@ -63,11 +63,11 @@ def mhc_post_kernel(
     h_mask = h_off < H
 
     # ── pointer bases (contiguous layout) ──
-    a_base = pid_n * 16           # (N, 4, 4) → stride_n = 16
-    c_base = pid_n * 4            # (N, 4)    → stride_n = 4
-    b_base = pid_n * 4 * H        # (N, 4, H) → stride_n = 4*H
-    d_base = pid_n * H            # (N, H)    → stride_n = H
-    out_base = pid_n * 4 * H      # (N, 4, H) → stride_n = 4*H
+    a_base = pid_n * 16  # (N, 4, 4) → stride_n = 16
+    c_base = pid_n * 4  # (N, 4)    → stride_n = 4
+    b_base = pid_n * 4 * H  # (N, 4, H) → stride_n = 4*H
+    d_base = pid_n * H  # (N, H)    → stride_n = H
+    out_base = pid_n * 4 * H  # (N, 4, H) → stride_n = 4*H
 
     # ── load 20 scalars (L1 cached across h-tiles) ──
     c0 = tl.load(c_ptr + c_base + 0).to(tl.float32)
@@ -75,16 +75,16 @@ def mhc_post_kernel(
     c2 = tl.load(c_ptr + c_base + 2).to(tl.float32)
     c3 = tl.load(c_ptr + c_base + 3).to(tl.float32)
 
-    a00 = tl.load(a_ptr + a_base +  0).to(tl.float32)
-    a01 = tl.load(a_ptr + a_base +  1).to(tl.float32)
-    a02 = tl.load(a_ptr + a_base +  2).to(tl.float32)
-    a03 = tl.load(a_ptr + a_base +  3).to(tl.float32)
-    a10 = tl.load(a_ptr + a_base +  4).to(tl.float32)
-    a11 = tl.load(a_ptr + a_base +  5).to(tl.float32)
-    a12 = tl.load(a_ptr + a_base +  6).to(tl.float32)
-    a13 = tl.load(a_ptr + a_base +  7).to(tl.float32)
-    a20 = tl.load(a_ptr + a_base +  8).to(tl.float32)
-    a21 = tl.load(a_ptr + a_base +  9).to(tl.float32)
+    a00 = tl.load(a_ptr + a_base + 0).to(tl.float32)
+    a01 = tl.load(a_ptr + a_base + 1).to(tl.float32)
+    a02 = tl.load(a_ptr + a_base + 2).to(tl.float32)
+    a03 = tl.load(a_ptr + a_base + 3).to(tl.float32)
+    a10 = tl.load(a_ptr + a_base + 4).to(tl.float32)
+    a11 = tl.load(a_ptr + a_base + 5).to(tl.float32)
+    a12 = tl.load(a_ptr + a_base + 6).to(tl.float32)
+    a13 = tl.load(a_ptr + a_base + 7).to(tl.float32)
+    a20 = tl.load(a_ptr + a_base + 8).to(tl.float32)
+    a21 = tl.load(a_ptr + a_base + 9).to(tl.float32)
     a22 = tl.load(a_ptr + a_base + 10).to(tl.float32)
     a23 = tl.load(a_ptr + a_base + 11).to(tl.float32)
     a30 = tl.load(a_ptr + a_base + 12).to(tl.float32)
@@ -147,15 +147,19 @@ def mhc_post(
     out = torch.empty_like(residual)
 
     c = post_layer_mix.squeeze(-1).contiguous()  # (N, 4)
-    a = comb_res_mix.contiguous()                # (N, 4, 4)
-    b = residual.contiguous()                    # (N, 4, H)
-    d = x.contiguous()                           # (N, H)
+    a = comb_res_mix.contiguous()  # (N, 4, 4)
+    b = residual.contiguous()  # (N, 4, H)
+    d = x.contiguous()  # (N, H)
 
     def grid(META):
         return (N, triton.cdiv(H, META["BLOCK_H"]))
 
     mhc_post_kernel[grid](
-        a, b, c, d, out,
+        a,
+        b,
+        c,
+        d,
+        out,
         H=H,
     )
     return out
