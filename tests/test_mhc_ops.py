@@ -11,6 +11,7 @@ from itertools import product
 import pytest
 import torch
 
+import flag_gems
 from flag_gems.fused.mhc.mhc_bwd import mhc_bwd, mhc_bwd_ref, sinkhorn_forward
 from flag_gems.fused.mhc.mhc_post import mhc_post, mhc_post_ref
 from flag_gems.fused.mhc.mhc_pre import mhc_pre, mhc_pre_ref
@@ -38,7 +39,9 @@ except ImportError:
     set_autotune_inputs = None
 
 
-def generate_mhc_post_data(n: int, h: int, hc_mult: int = 4, device: str = "cuda"):
+def generate_mhc_post_data(
+    n: int, h: int, hc_mult: int = 4, device: str = flag_gems.device
+):
     torch.manual_seed(42)
     x = torch.randn((n, h), dtype=torch.bfloat16, device=device)
     residual = torch.randn((n, hc_mult, h), dtype=torch.bfloat16, device=device)
@@ -103,7 +106,7 @@ def generate_mhc_pre_data(
     hc_sinkhorn_eps: float = 1e-6,
     hc_post_mult_value: float = 1.0,
     sinkhorn_repeat: int = 10,
-    device: str = "cuda",
+    device: str = flag_gems.device,
 ):
     torch.manual_seed(42)
     hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
@@ -185,7 +188,7 @@ def generate_mhc_bwd_data(
     seqlen: int,
     n_stream: int,
     sinkhorn_iters: int = 20,
-    device: str = "cuda",
+    device: str = flag_gems.device,
 ):
     """Generate test data for mhc_bwd.
 
