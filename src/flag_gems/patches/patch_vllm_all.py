@@ -488,6 +488,37 @@ def custom_gems_flashattn_mla_forward_decode(
         return o, None
 
 
+def custom_gems_flashmla_sparse_bf16_kernel(
+    self,
+    q: torch.Tensor,
+    kv_c_and_k_pe_cache: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> torch.Tensor:
+    from flag_gems.fused.DSA.sparse_mla import triton_sparse_mla_fwd_interface
+
+    num_tokens = q.shape[0]
+    q_num_heads = q.shape[1]
+
+    if q_num_heads % self.padding != 0:
+        assert self.padding % q_num_heads == 0
+        q_padded = q.new_empty((num_tokens, self.padding, q.shape[2]))
+        q_padded[:, :q_num_heads, :] = q
+        q = q_padded
+
+    q = q.unsqueeze(0).contiguous()
+    kv = kv_c_and_k_pe_cache.view(1, -1, 1, kv_c_and_k_pe_cache.shape[-1]).contiguous()
+    indices = topk_indices.view(num_tokens, 1, -1).unsqueeze(0).contiguous()
+
+    attn_out, _ = triton_sparse_mla_fwd_interface(
+        q=q,
+        kv=kv,
+        indices=indices,
+        sm_scale=self.softmax_scale,
+        d_v=self.kv_lora_rank,
+    )
+    return attn_out.squeeze(0)[:, :q_num_heads, :]
+
+
 # use gems flash attention in vit attention
 def patch_vllm_vit_to_attn(vitw):
     _orig_vit = vitw.vit_xformers_attn_wrapper
@@ -552,7 +583,49 @@ def patch_vllm_vit_to_attn(vitw):
     vitw.vit_xformers_attn_wrapper = _wrapped_vit_xformers_attn_wrapper
 
 
-def apply_gems_patches_to_vllm(verbose=True):
+_AVAILABLE_PATCH_OPS: tuple[str, ...] = (
+    "rms_forward_cuda",
+    "rope_forward_cuda",
+    "write_to_paged_cache",
+    "silu_and_mul_forward_cuda",
+    "triton_mla_forward_decode",
+    "flash_attention_forward",
+    "flashattn_mla_forward_decode",
+    "flashmla_sparse_bf16_kernel",
+    "lib_silu_and_mul",
+    "lib_cutlass_scaled_mm",
+    "lib_moe_align_block_size",
+    "lib_topk_softmax",
+    "lib_moe_sum",
+    "lib_get_scheduler_metadata",
+    "lib_grouped_topk",
+    "lib_per_token_group_fp8_quant",
+    "lib_apply_repetition_penalties",
+    "lib_concat_and_cache_mla",
+    "vit_xformers_attn_wrapper",
+)
+
+
+def list_available_patch_ops() -> list[str]:
+    """Return all valid operator names accepted by patch selection APIs."""
+    return list(_AVAILABLE_PATCH_OPS)
+
+
+def apply_gems_patches_to_vllm(
+    verbose=True,
+    enable_ops: Optional[list[str]] = None,
+    disable_ops: Optional[list[str]] = None,
+):
+    """Apply vLLM patches with explicit operator-level selection.
+
+    Modes:
+    1) Default (enable_ops=None and disable_ops=None): patch nothing.
+    2) enable_ops provided: patch only operators in enable_ops.
+    3) disable_ops provided: patch all operators except those in disable_ops.
+
+    Note:
+    - enable_ops and disable_ops are mutually exclusive.
+    """
     import vllm  # noqa: F401
     import vllm._custom_ops as ops  # noqa: F401
 
@@ -568,34 +641,130 @@ def apply_gems_patches_to_vllm(verbose=True):
     from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnMLAImpl
     from vllm.v1.attention.backends.mla.triton_mla import TritonMLAImpl
 
+    try:
+        from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+    except (ModuleNotFoundError, ImportError):
+        FlashMLASparseImpl = None
+
+    if enable_ops is not None and disable_ops is not None:
+        raise ValueError("enable_ops and disable_ops are mutually exclusive")
+
+    enabled_set = set(enable_ops) if enable_ops is not None else None
+    disabled_set = set(disable_ops) if disable_ops is not None else None
+
+    available_ops = set(_AVAILABLE_PATCH_OPS)
+
+    unknown_ops = set()
+    if enabled_set is not None:
+        unknown_ops = enabled_set - available_ops
+    elif disabled_set is not None:
+        unknown_ops = disabled_set - available_ops
+    if unknown_ops:
+        raise ValueError(f"Unknown ops in patch selection: {sorted(unknown_ops)}")
+
+    def should_patch(op_name: str) -> bool:
+        if enabled_set is not None:
+            return op_name in enabled_set
+        if disabled_set is not None:
+            return op_name not in disabled_set
+        return False
+
     dispatch_key = flag_gems.runtime.device.dispatch_key
 
     module_patches = [
-        (RMSNorm, "forward_cuda", custom_gems_rms_forward_cuda),
-        (RotaryEmbedding, "forward_cuda", custom_gems_rope_forward_cuda),
-        (PagedAttention, "write_to_paged_cache", custom_gems_write_to_paged_cache),
-        (SiluAndMul, "forward_cuda", custom_gems_silu_and_mul),
-        (TritonMLAImpl, "_forward_decode", custom_gems_flash_mla_forward),
-        (FlashAttentionImpl, "forward", custom_gems_flash_attention_impl_forward),
-        (FlashAttnMLAImpl, "_forward_decode", custom_gems_flashattn_mla_forward_decode),
+        ("rms_forward_cuda", RMSNorm, "forward_cuda", custom_gems_rms_forward_cuda),
+        (
+            "rope_forward_cuda",
+            RotaryEmbedding,
+            "forward_cuda",
+            custom_gems_rope_forward_cuda,
+        ),
+        (
+            "write_to_paged_cache",
+            PagedAttention,
+            "write_to_paged_cache",
+            custom_gems_write_to_paged_cache,
+        ),
+        (
+            "silu_and_mul_forward_cuda",
+            SiluAndMul,
+            "forward_cuda",
+            custom_gems_silu_and_mul,
+        ),
+        (
+            "triton_mla_forward_decode",
+            TritonMLAImpl,
+            "_forward_decode",
+            custom_gems_flash_mla_forward,
+        ),
+        (
+            "flash_attention_forward",
+            FlashAttentionImpl,
+            "forward",
+            custom_gems_flash_attention_impl_forward,
+        ),
+        (
+            "flashattn_mla_forward_decode",
+            FlashAttnMLAImpl,
+            "_forward_decode",
+            custom_gems_flashattn_mla_forward_decode,
+        ),
     ]
-    for cls, method_name, new_method in module_patches:
-        patch_module_method(cls, method_name, new_method, verbose)
+    for op_name, cls, method_name, new_method in module_patches:
+        if should_patch(op_name):
+            patch_module_method(cls, method_name, new_method, verbose)
+
+    if FlashMLASparseImpl is not None and should_patch("flashmla_sparse_bf16_kernel"):
+        patch_module_method(
+            FlashMLASparseImpl,
+            "_bf16_flash_mla_kernel",
+            custom_gems_flashmla_sparse_bf16_kernel,
+            verbose,
+        )
 
     lib_patches = [
-        ("_C", "silu_and_mul", custom_silu_and_mul),
-        ("_C", "cutlass_scaled_mm", custom_cutlass_scaled_mm),
-        ("_moe_C", "moe_align_block_size", custom_moe_align_block_size),
-        ("_moe_C", "topk_softmax", custom_topk_softmax),
-        ("_moe_C", "moe_sum", custom_moe_sum),
-        ("_vllm_fa3_C", "get_scheduler_metadata", custom_get_scheduler_metadata),
-        ("_moe_C", "grouped_topk", custom_moe_grouped_topk),
-        ("_C", "per_token_group_fp8_quant", custom_per_token_group_fp8_quant),
-        ("_C", "apply_repetition_penalties_", custom_apply_repetition_penalties),
-        ("_C_cache_ops", "concat_and_cache_mla", custom_concat_and_cache_mla),
+        ("lib_silu_and_mul", "_C", "silu_and_mul", custom_silu_and_mul),
+        ("lib_cutlass_scaled_mm", "_C", "cutlass_scaled_mm", custom_cutlass_scaled_mm),
+        (
+            "lib_moe_align_block_size",
+            "_moe_C",
+            "moe_align_block_size",
+            custom_moe_align_block_size,
+        ),
+        ("lib_topk_softmax", "_moe_C", "topk_softmax", custom_topk_softmax),
+        ("lib_moe_sum", "_moe_C", "moe_sum", custom_moe_sum),
+        (
+            "lib_get_scheduler_metadata",
+            "_vllm_fa3_C",
+            "get_scheduler_metadata",
+            custom_get_scheduler_metadata,
+        ),
+        ("lib_grouped_topk", "_moe_C", "grouped_topk", custom_moe_grouped_topk),
+        (
+            "lib_per_token_group_fp8_quant",
+            "_C",
+            "per_token_group_fp8_quant",
+            custom_per_token_group_fp8_quant,
+        ),
+        (
+            "lib_apply_repetition_penalties",
+            "_C",
+            "apply_repetition_penalties_",
+            custom_apply_repetition_penalties,
+        ),
+        (
+            "lib_concat_and_cache_mla",
+            "_C_cache_ops",
+            "concat_and_cache_mla",
+            custom_concat_and_cache_mla,
+        ),
     ]
-    for lib_name, fn_name, fn in lib_patches:
-        patch_vllm_lib(lib_name, fn_name, fn, dispatch_key, verbose)
+    for op_name, lib_name, fn_name, fn in lib_patches:
+        if should_patch(op_name):
+            patch_vllm_lib(lib_name, fn_name, fn, dispatch_key, verbose)
 
-    if vitw is not None:
-        patch_vllm_vit_to_attn(vitw)
+    if should_patch("vit_xformers_attn_wrapper"):
+        if vitw is not None and hasattr(vitw, "vit_xformers_attn_wrapper"):
+            patch_vllm_vit_to_attn(vitw)
+        elif verbose and vitw is not None:
+            print("Skip vit wrapper patch: vit_xformers_attn_wrapper is not available.")
