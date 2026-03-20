@@ -80,6 +80,34 @@ def dequant_mxfp6(
 # Activation quantization helpers
 
 
+@functools.lru_cache(maxsize=1)
+def _get_device_name() -> str:
+    """Return the normalised CUDA device name (spaces replaced by underscores).
+
+    Matches the naming convention used by vLLM for its per-device config files.
+    H800 falls back to H100_80GB_HBM3 (same SM 9.0 architecture).
+    """
+    name = torch.cuda.get_device_name().replace(" ", "_")
+    # Normalise the H200 product family to a single key, following vLLM.
+    if "H200" in name.split("_"):
+        name = "NVIDIA_H200"
+    # H800 has the same SM 9.0 as H100; use H100 configs as fallback.
+    if name in _EMBEDDED_MOE_CONFIGS:
+        return name
+    # Fallback mapping for devices whose tuning profiles are equivalent.
+    _FALLBACK = {
+        "NVIDIA_H800": "NVIDIA_H100_80GB_HBM3",
+        "NVIDIA_H800_80GB_HBM3": "NVIDIA_H100_80GB_HBM3",
+        "NVIDIA_A800-SXM4-80GB": "NVIDIA_A800-SXM4-80GB",
+        "NVIDIA_A100-SXM4-40GB": "NVIDIA_A100-SXM4-40GB",
+    }
+    fallback = _FALLBACK.get(name)
+    if fallback and fallback in _EMBEDDED_MOE_CONFIGS:
+        logger.info("Device %s not in config table, falling back to %s", name, fallback)
+        return fallback
+    return name
+
+
 def get_moe_configs(
     E: int,
     N: int,
@@ -90,18 +118,28 @@ def get_moe_configs(
     """
     Return optimized configurations for the fused MoE kernel.
 
-    Looks up pre-tuned configs from the embedded table (ported from vLLM v0.17.0
-    for NVIDIA H20). Returns None if no matching config is found.
+    Looks up pre-tuned configs from the embedded table (ported from vLLM)
+    for the current GPU device. Returns None if no matching config is found.
     """
+    device_name = _get_device_name()
+    device_table = _EMBEDDED_MOE_CONFIGS.get(device_name)
+    if device_table is None:
+        logger.warning(
+            "No embedded MoE configs for device %s. Will use default config.",
+            device_name,
+        )
+        return None
+
     _block_n = block_n if block_n else 0
     _block_k = block_k if block_k else 0
     key = (E, N, dtype, _block_n, _block_k)
-    configs = _EMBEDDED_MOE_CONFIGS.get(key)
+    configs = device_table.get(key)
     if configs is not None:
-        logger.info("Using embedded MoE config for key=%s", key)
+        logger.info("Using embedded MoE config for device=%s, key=%s", device_name, key)
         return configs
     logger.warning(
-        "No embedded MoE config for key=%s. Will use default config.", key
+        "No embedded MoE config for device=%s, key=%s. Will use default config.",
+        device_name, key,
     )
     return None
 
