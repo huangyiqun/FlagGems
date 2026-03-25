@@ -28,9 +28,9 @@ def _view_as_complex_kernel(inp_ptr, out_ptr, n_elem, BLOCK_SIZE: tl.constexpr):
 
 def view_as_complex(A: torch.Tensor):
     logger.debug("GEMS VIEW_AS_COMPLEX")
-    if A.dtype not in (torch.float32, torch.float64):
+    if A.dtype not in (torch.float16, torch.float32, torch.float64):
         raise RuntimeError(
-            "view_as_complex is only supported for float32 and float64 tensors"
+            "view_as_complex is only supported for float16, float32 and float64 tensors"
         )
     if A.ndim < 1 or A.shape[-1] != 2:
         raise RuntimeError("Tensor must have a last dimension of size 2")
@@ -38,11 +38,20 @@ def view_as_complex(A: torch.Tensor):
     if A.stride(-1) != 1:
         raise RuntimeError("Tensor must have a last dimension with stride 1")
 
-    out_dtype = torch.complex64 if A.dtype == torch.float32 else torch.complex128
+    if A.dtype == torch.float16:
+        out_dtype = torch.complex32
+    elif A.dtype == torch.float32:
+        out_dtype = torch.complex64
+    else:
+        out_dtype = torch.complex128
     out = torch.empty(A.shape[:-1], device=A.device, dtype=out_dtype)
     n_elem = out.numel()
     if n_elem == 0:
         return out
+
+    if out.ndim == 0:
+        flat = A.contiguous().view(-1)
+        return torch.complex(flat[0], flat[1])
 
     inp = A.contiguous().view(-1)
     out_view = out.view(A.dtype).view(-1)

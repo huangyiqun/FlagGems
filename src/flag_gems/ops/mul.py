@@ -3,6 +3,8 @@ import logging
 import torch
 import triton
 
+from flag_gems.ops.resolve_conj import resolve_conj
+from flag_gems.ops.view_as_complex import view_as_complex as fg_view_as_complex
 from flag_gems.utils import pointwise_dynamic
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,12 @@ def mul_complex_kernel(ar, ai, br, bi):
 
 def mul(A, B):
     logger.debug("GEMS MUL")
+
+    if isinstance(A, torch.Tensor) and A.is_complex() and A.is_conj():
+        A = resolve_conj(A)
+    if isinstance(B, torch.Tensor) and B.is_complex() and B.is_conj():
+        B = resolve_conj(B)
+
     A_is_complex = (isinstance(A, torch.Tensor) and A.is_complex()) or isinstance(
         A, complex
     )
@@ -51,11 +59,17 @@ def mul(A, B):
             ar, ai = ar.to(common_dtype), ai.to(common_dtype)
             br, bi = br.to(common_dtype), bi.to(common_dtype)
 
-            real_out = torch.empty_like(ar, dtype=common_dtype)
-            imag_out = torch.empty_like(ar, dtype=common_dtype)
-            mul_complex_kernel(ar, ai, br, bi, out0=real_out, out1=imag_out)
+            out_real = torch.empty((*ar.shape, 2), dtype=common_dtype, device=ar.device)
+            mul_complex_kernel(
+                ar,
+                ai,
+                br,
+                bi,
+                out0=out_real[..., 0],
+                out1=out_real[..., 1],
+            )
 
-            out = torch.view_as_complex(torch.stack((real_out, imag_out), dim=-1))
+            out = fg_view_as_complex(out_real)
             return out.to(torch.result_type(A, B))
         # 2) A complex, B real
         elif A_is_complex and not B_is_complex:
@@ -65,7 +79,7 @@ def mul(A, B):
                 out_real = mul_func(Ar, Br)
             else:
                 out_real = mul_func_scalar(Ar, Br)
-            return torch.view_as_complex(out_real).to(torch.result_type(A, B))
+            return fg_view_as_complex(out_real).to(torch.result_type(A, B))
         # 3) A real, B complex
         else:  # not A_is_complex and B_is_complex
             Br = torch.view_as_real(B)
@@ -74,7 +88,7 @@ def mul(A, B):
                 out_real = mul_func(Ar, Br)  # shape broadcasting requires Ar and Br
             else:
                 out_real = mul_func_scalar(Br, Ar)  # Br is tensor, Ar is scalar
-            return torch.view_as_complex(out_real).to(torch.result_type(A, B))
+            return fg_view_as_complex(out_real).to(torch.result_type(A, B))
     elif isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor):
         return mul_func(A, B)
     elif isinstance(A, torch.Tensor):
