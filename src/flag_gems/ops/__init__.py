@@ -28,7 +28,7 @@ from flag_gems.ops.atan import atan, atan_
 from flag_gems.ops.attention import (
     ScaleDotProductAttention,
     flash_attention_forward,
-    flash_attn_varlen_func,
+    # flash_attn_varlen_func,
     scaled_dot_product_attention,
     scaled_dot_product_attention_backward,
     scaled_dot_product_attention_forward,
@@ -423,7 +423,7 @@ __all__ = [
     "fill_tensor_",
     "fill_tensor_out",
     "flash_attention_forward",
-    "flash_attn_varlen_func",
+    # "flash_attn_varlen_func",
     "flip",
     "floor_",
     "floor_divide",

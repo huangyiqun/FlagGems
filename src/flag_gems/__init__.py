@@ -29,10 +29,11 @@ def torch_ge(v):
 
 _FULL_CONFIG = (
     ("_flash_attention_forward", flash_attention_forward),
-    (
-        "_functional_sym_constrain_range_for_size",
-        _functional_sym_constrain_range_for_size,
-    ),
+    # todo: check benchmark
+    # (
+    #     "_functional_sym_constrain_range_for_size",
+    #     _functional_sym_constrain_range_for_size,
+    # ),
     ("_log_softmax", log_softmax),
     ("_log_softmax_backward_data", log_softmax_backward),
     ("_safe_softmax", _safe_softmax),
@@ -292,8 +293,9 @@ _FULL_CONFIG = (
     ("nll_loss_forward", nll_loss_forward),
     ("nll_loss2d_backward", nll_loss2d_backward),
     ("nll_loss2d_forward", nll_loss2d_forward),
-    ("nll_loss_nd_forward", nll_loss_nd_forward),
-    ("nll_loss_nd_backward", nll_loss_nd_backward),
+    # todo: check benchmark
+    # ("nll_loss_nd_forward", nll_loss_nd_forward),
+    # ("nll_loss_nd_backward", nll_loss_nd_backward),
     ("nonzero", nonzero),
     ("normal.float_Tensor", normal_float_tensor),
     ("normal.Tensor_float", normal_tensor_float),
@@ -322,8 +324,9 @@ _FULL_CONFIG = (
     ("randperm", randperm),
     ("reciprocal", reciprocal),
     ("reciprocal_", reciprocal_),
-    ("reflection_pad2d", reflection_pad2d),
-    ("reflection_pad2d.out", reflection_pad2d_out),
+    # todo: check benchmark
+    # ("reflection_pad2d", reflection_pad2d),
+    # ("reflection_pad2d.out", reflection_pad2d_out),
     ("reflection_pad1d", reflection_pad1d),
     ("reflection_pad1d.out", reflection_pad1d_out),
     ("relu", relu),
