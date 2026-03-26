@@ -4,7 +4,6 @@ from typing import Optional
 import torch
 import triton
 
-from flag_gems.ops.resolve_conj import resolve_conj_triton
 from flag_gems.utils import pointwise_dynamic
 
 logger = logging.getLogger(__name__)
@@ -108,11 +107,12 @@ def copy_(dst: torch.Tensor, src: torch.Tensor, non_blocking: bool = False):
         need_conj_transform = src_is_conj ^ dst_is_conj
         need_neg_transform = src_is_neg ^ dst_is_neg
 
-        if need_conj_transform:
-            transformed_src = resolve_conj_triton(transformed_src, is_conj=True)
-
         work_dst = torch.view_as_real(work_dst)
         work_src = torch.view_as_real(transformed_src)
+
+        if need_conj_transform:
+            work_src = work_src.clone()
+            work_src[..., 1].neg_()
 
         if need_neg_transform:
             work_src = -work_src
