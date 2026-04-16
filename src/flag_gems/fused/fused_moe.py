@@ -1401,6 +1401,238 @@ def dispatch_fused_moe_kernel(
         )
 
 
+@triton.jit
+def fused_moe_mega_triton_kernel(
+    hidden_ptr,
+    w1_ptr,
+    w2_ptr,
+    topk_weights_ptr,
+    topk_ids_ptr,
+    out_ptr,
+    M,
+    H,
+    D,
+    stride_hm,
+    stride_hk,
+    stride_w1e,
+    stride_w1n,
+    stride_w1k,
+    stride_w2e,
+    stride_w2k,
+    stride_w2d,
+    stride_twm,
+    stride_twt,
+    stride_tim,
+    stride_tit,
+    stride_om,
+    stride_ok,
+    TOPK: tl.constexpr,
+    APPLY_ROUTER_WEIGHT_ON_INPUT: tl.constexpr,
+    BLOCK_K_OUT: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_k = tl.program_id(axis=1)
+
+    if pid_m >= M:
+        return
+
+    offs_k = pid_k * BLOCK_K_OUT + tl.arange(0, BLOCK_K_OUT)
+    k_mask = offs_k < H
+    out_acc = tl.zeros((BLOCK_K_OUT,), dtype=tl.float32)
+
+    for topk_idx in tl.static_range(0, TOPK):
+        route_weight = tl.load(
+            topk_weights_ptr + pid_m * stride_twm + topk_idx * stride_twt,
+        ).to(tl.float32)
+        expert_idx = tl.load(
+            topk_ids_ptr + pid_m * stride_tim + topk_idx * stride_tit,
+        ).to(tl.int64)
+
+        for d_start in range(0, tl.cdiv(D, BLOCK_D)):
+            offs_d = d_start * BLOCK_D + tl.arange(0, BLOCK_D)
+            d_mask = offs_d < D
+
+            gate_acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+            up_acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
+            for h_start in range(0, tl.cdiv(H, BLOCK_H)):
+                offs_h = h_start * BLOCK_H + tl.arange(0, BLOCK_H)
+                h_mask = offs_h < H
+
+                h_values = tl.load(
+                    hidden_ptr + pid_m * stride_hm + offs_h * stride_hk,
+                    mask=h_mask,
+                    other=0.0,
+                ).to(tl.float32)
+
+                w1_gate = tl.load(
+                    w1_ptr
+                    + expert_idx * stride_w1e
+                    + offs_d[:, None] * stride_w1n
+                    + offs_h[None, :] * stride_w1k,
+                    mask=d_mask[:, None] & h_mask[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                w1_up = tl.load(
+                    w1_ptr
+                    + expert_idx * stride_w1e
+                    + (offs_d + D)[:, None] * stride_w1n
+                    + offs_h[None, :] * stride_w1k,
+                    mask=d_mask[:, None] & h_mask[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+
+                gate_acc += tl.sum(w1_gate * h_values[None, :], axis=1)
+                up_acc += tl.sum(w1_up * h_values[None, :], axis=1)
+
+            if APPLY_ROUTER_WEIGHT_ON_INPUT:
+                gate_acc = gate_acc * route_weight
+                up_acc = up_acc * route_weight
+
+            swiglu_values = gate_acc * tl.sigmoid(gate_acc) * up_acc
+            if not APPLY_ROUTER_WEIGHT_ON_INPUT:
+                swiglu_values = swiglu_values * route_weight
+
+            w2_values = tl.load(
+                w2_ptr
+                + expert_idx * stride_w2e
+                + offs_k[:, None] * stride_w2k
+                + offs_d[None, :] * stride_w2d,
+                mask=k_mask[:, None] & d_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            out_acc += tl.sum(w2_values * swiglu_values[None, :], axis=1)
+
+    tl.store(
+        out_ptr + pid_m * stride_om + offs_k * stride_ok,
+        out_acc,
+        mask=k_mask,
+    )
+
+
+def _can_use_mega_moe_triton_bf16_fp16(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str,
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    ocp_mx_scheme: str | None,
+    per_channel_quant: bool,
+    expert_map: torch.Tensor | None,
+    w1_scale: Optional[torch.Tensor],
+    w2_scale: Optional[torch.Tensor],
+    w1_zp: torch.Tensor | None,
+    w2_zp: torch.Tensor | None,
+    a1_scale: Optional[torch.Tensor],
+    a2_scale: Optional[torch.Tensor],
+    block_shape: Optional[list[int]],
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
+) -> bool:
+    if activation != "silu":
+        return False
+    if hidden_states.dtype not in (torch.bfloat16, torch.float16):
+        return False
+    if (
+        use_fp8_w8a8
+        or use_int8_w8a8
+        or use_int8_w8a16
+        or use_int4_w4a16
+        or ocp_mx_scheme is not None
+        or per_channel_quant
+    ):
+        return False
+    if expert_map is not None:
+        return False
+    if any(
+        x is not None
+        for x in (
+            w1_scale,
+            w2_scale,
+            w1_zp,
+            w2_zp,
+            a1_scale,
+            a2_scale,
+            w1_bias,
+            w2_bias,
+        )
+    ):
+        return False
+    if block_shape is not None:
+        return False
+    if topk_ids.size(1) > 8:
+        return False
+    if w1.size(1) % 2 != 0:
+        return False
+    return True
+
+
+def invoke_fused_moe_mega_triton_kernel(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    out_hidden_states: torch.Tensor,
+    apply_router_weight_on_input: bool,
+) -> None:
+    assert hidden_states.ndim == 2
+    assert w1.ndim == 3
+    assert w2.ndim == 3
+    assert topk_weights.ndim == 2
+    assert topk_ids.ndim == 2
+    assert hidden_states.dtype in (torch.bfloat16, torch.float16)
+
+    M, H = hidden_states.shape
+    E, two_d, h_w1 = w1.shape
+    e_w2, h_w2, D = w2.shape
+    assert h_w1 == H and h_w2 == H and e_w2 == E and two_d == 2 * D
+
+    topk_weights_contig = topk_weights.contiguous()
+    topk_ids_i32 = topk_ids.to(torch.int32).contiguous()
+
+    BLOCK_K_OUT = 64
+    BLOCK_D = 32
+    BLOCK_H = 32
+    grid = (M, triton.cdiv(H, BLOCK_K_OUT))
+
+    fused_moe_mega_triton_kernel[grid](
+        hidden_states,
+        w1,
+        w2,
+        topk_weights_contig,
+        topk_ids_i32,
+        out_hidden_states,
+        M,
+        H,
+        D,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        w1.stride(0),
+        w1.stride(1),
+        w1.stride(2),
+        w2.stride(0),
+        w2.stride(1),
+        w2.stride(2),
+        topk_weights_contig.stride(0),
+        topk_weights_contig.stride(1),
+        topk_ids_i32.stride(0),
+        topk_ids_i32.stride(1),
+        out_hidden_states.stride(0),
+        out_hidden_states.stride(1),
+        TOPK=topk_ids.size(1),
+        APPLY_ROUTER_WEIGHT_ON_INPUT=apply_router_weight_on_input,
+        BLOCK_K_OUT=BLOCK_K_OUT,
+        BLOCK_D=BLOCK_D,
+        BLOCK_H=BLOCK_H,
+    )
+
+
 def fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1483,6 +1715,29 @@ def fused_experts_impl(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         ocp_mx_scheme=ocp_mx_scheme,
+    )
+
+    use_mega_moe_triton_path = _can_use_mega_moe_triton_bf16_fp16(
+        hidden_states=hidden_states,
+        w1=w1,
+        topk_ids=topk_ids,
+        activation=activation,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        ocp_mx_scheme=ocp_mx_scheme,
+        per_channel_quant=per_channel_quant,
+        expert_map=expert_map,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zp=w1_zp,
+        w2_zp=w2_zp,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
     )
 
     get_config_func = functools.partial(
@@ -1584,6 +1839,19 @@ def fused_experts_impl(
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
+
+        if use_mega_moe_triton_path:
+            invoke_fused_moe_mega_triton_kernel(
+                hidden_states=curr_hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=curr_topk_weights,
+                topk_ids=curr_topk_ids,
+                out_hidden_states=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            continue
+
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
             A=curr_hidden_states,
             A_scale=a1_scale,
