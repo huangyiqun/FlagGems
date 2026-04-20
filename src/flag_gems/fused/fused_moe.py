@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 OCP_MX_BLOCK_SIZE = 32
 
+_MEGA_WORKSPACE_POOL: dict[tuple[int, torch.dtype, int, int], torch.Tensor] = {}
+_MEGA_OUT_ROUTES_POOL: dict[tuple[int, torch.dtype, int, int, int], torch.Tensor] = {}
+_MEGA_PLAN_CACHE: dict[
+    tuple[int, torch.dtype, int, int, int, int, int], tuple[int, int, int, int, int]
+] = {}
+
 
 @functools.lru_cache(maxsize=1)
 def get_embedded_moe_configs():
@@ -1401,6 +1407,93 @@ def dispatch_fused_moe_kernel(
         )
 
 
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 64,
+                "BLOCK_D": 32,
+                "BLOCK_H": 32,
+            },
+            num_warps=4,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 32,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 64,
+                "BLOCK_D": 64,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 64,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 128,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 256,
+                "BLOCK_D": 128,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 64,
+                "BLOCK_H": 64,
+            },
+            num_warps=8,
+            num_stages=3,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 256,
+                "BLOCK_D": 64,
+                "BLOCK_H": 64,
+            },
+            num_warps=8,
+            num_stages=3,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 128,
+                "BLOCK_H": 64,
+            },
+            num_warps=8,
+            num_stages=3,
+        ),
+    ],
+    key=["H", "D"],
+    reset_to_zero=["out_ptr"],
+)
 @triton.jit
 def fused_moe_mega_triton_kernel(
     hidden_ptr,
@@ -1432,84 +1525,710 @@ def fused_moe_mega_triton_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
+    pid = tl.program_id(axis=0)
+    num_d_blocks = tl.cdiv(D, BLOCK_D)
+    route_linear = pid // num_d_blocks
+    d_block_idx = pid % num_d_blocks
+
+    token_idx = route_linear // TOPK
+    topk_idx = route_linear % TOPK
+    if token_idx >= M:
+        return
+
+    route_weight = tl.load(
+        topk_weights_ptr + token_idx * stride_twm + topk_idx * stride_twt,
+    ).to(tl.float32)
+    expert_idx = tl.load(
+        topk_ids_ptr + token_idx * stride_tim + topk_idx * stride_tit,
+    ).to(tl.int64)
+
+    offs_d = d_block_idx * BLOCK_D + tl.arange(0, BLOCK_D)
+    d_mask = offs_d < D
+
+    gate_acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    up_acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
+    for h_start in range(0, tl.cdiv(H, BLOCK_H)):
+        offs_h = h_start * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = offs_h < H
+
+        h_values = tl.load(
+            hidden_ptr + token_idx * stride_hm + offs_h * stride_hk,
+            mask=h_mask,
+            other=0.0,
+        ).to(tl.float32)
+
+        w1_gate = tl.load(
+            w1_ptr
+            + expert_idx * stride_w1e
+            + offs_d[:, None] * stride_w1n
+            + offs_h[None, :] * stride_w1k,
+            mask=d_mask[:, None] & h_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        w1_up = tl.load(
+            w1_ptr
+            + expert_idx * stride_w1e
+            + (offs_d + D)[:, None] * stride_w1n
+            + offs_h[None, :] * stride_w1k,
+            mask=d_mask[:, None] & h_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+
+        gate_acc += tl.sum(w1_gate * h_values[None, :], axis=1)
+        up_acc += tl.sum(w1_up * h_values[None, :], axis=1)
+
+    if APPLY_ROUTER_WEIGHT_ON_INPUT:
+        gate_acc = gate_acc * route_weight
+        up_acc = up_acc * route_weight
+
+    swiglu_values = gate_acc * tl.sigmoid(gate_acc) * up_acc
+    if not APPLY_ROUTER_WEIGHT_ON_INPUT:
+        swiglu_values = swiglu_values * route_weight
+
+    for k_block_idx in range(0, tl.cdiv(H, BLOCK_K_OUT)):
+        offs_k = k_block_idx * BLOCK_K_OUT + tl.arange(0, BLOCK_K_OUT)
+        k_mask = offs_k < H
+        w2_values = tl.load(
+            w2_ptr
+            + expert_idx * stride_w2e
+            + offs_k[:, None] * stride_w2k
+            + offs_d[None, :] * stride_w2d,
+            mask=k_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        out_acc = tl.sum(w2_values * swiglu_values[None, :], axis=1)
+        tl.atomic_add(
+            out_ptr + token_idx * stride_om + offs_k * stride_ok,
+            out_acc,
+            mask=k_mask,
+        )
+
+
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 64,
+                "BLOCK_D": 32,
+                "BLOCK_H": 32,
+            },
+            num_warps=4,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 64,
+                "BLOCK_D": 32,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 64,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_K_OUT": 128,
+                "BLOCK_D": 64,
+                "BLOCK_H": 32,
+            },
+            num_warps=8,
+            num_stages=2,
+        ),
+    ],
+    key=["H", "D"],
+)
+@triton.jit
+def fused_moe_mega_grouped_triton_kernel(
+    hidden_ptr,
+    w1_ptr,
+    w2_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    out_ptr,
+    H,
+    D,
+    num_valid_tokens,
+    stride_hm,
+    stride_hk,
+    stride_w1e,
+    stride_w1n,
+    stride_w1k,
+    stride_w2e,
+    stride_w2k,
+    stride_w2d,
+    stride_twm,
+    stride_twt,
+    stride_om,
+    stride_ot,
+    stride_ok,
+    TOPK: tl.constexpr,
+    APPLY_ROUTER_WEIGHT_ON_INPUT: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K_OUT: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
 
-    if pid_m >= M:
+    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
+    if pid_m * BLOCK_M >= num_tokens_post_padded:
         return
+
+    expert_idx = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+    if expert_idx == -1:
+        return
+
+    offs_route = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    route_ids = tl.load(sorted_token_ids_ptr + offs_route).to(tl.int64)
+    route_mask = route_ids < num_valid_tokens
+    token_idx = tl.where(route_mask, route_ids // TOPK, 0)
+    topk_slot = tl.where(route_mask, route_ids % TOPK, 0)
+
+    route_weight = tl.load(
+        topk_weights_ptr + token_idx * stride_twm + topk_slot * stride_twt,
+        mask=route_mask,
+        other=0.0,
+    ).to(tl.float32)
 
     offs_k = pid_k * BLOCK_K_OUT + tl.arange(0, BLOCK_K_OUT)
     k_mask = offs_k < H
-    out_acc = tl.zeros((BLOCK_K_OUT,), dtype=tl.float32)
 
-    for topk_idx in tl.static_range(0, TOPK):
-        route_weight = tl.load(
-            topk_weights_ptr + pid_m * stride_twm + topk_idx * stride_twt,
-        ).to(tl.float32)
-        expert_idx = tl.load(
-            topk_ids_ptr + pid_m * stride_tim + topk_idx * stride_tit,
-        ).to(tl.int64)
+    out_acc = tl.zeros((BLOCK_M, BLOCK_K_OUT), dtype=tl.float32)
 
-        for d_start in range(0, tl.cdiv(D, BLOCK_D)):
-            offs_d = d_start * BLOCK_D + tl.arange(0, BLOCK_D)
+    for d_block_idx in range(0, tl.cdiv(D, BLOCK_D)):
+        offs_d = d_block_idx * BLOCK_D + tl.arange(0, BLOCK_D)
+        d_mask = offs_d < D
+
+        gate_acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+        up_acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+
+        for h_start in range(0, tl.cdiv(H, BLOCK_H)):
+            offs_h = h_start * BLOCK_H + tl.arange(0, BLOCK_H)
+            h_mask = offs_h < H
+
+            h_vals = tl.load(
+                hidden_ptr + token_idx[:, None] * stride_hm + offs_h[None, :] * stride_hk,
+                mask=route_mask[:, None] & h_mask[None, :],
+                other=0.0,
+            )
+
+            w1_gate_t = tl.load(
+                w1_ptr
+                + expert_idx * stride_w1e
+                + offs_d[None, :] * stride_w1n
+                + offs_h[:, None] * stride_w1k,
+                mask=h_mask[:, None] & d_mask[None, :],
+                other=0.0,
+            )
+            w1_up_t = tl.load(
+                w1_ptr
+                + expert_idx * stride_w1e
+                + (offs_d + D)[None, :] * stride_w1n
+                + offs_h[:, None] * stride_w1k,
+                mask=h_mask[:, None] & d_mask[None, :],
+                other=0.0,
+            )
+
+            gate_acc += tl.dot(h_vals, w1_gate_t)
+            up_acc += tl.dot(h_vals, w1_up_t)
+
+        if APPLY_ROUTER_WEIGHT_ON_INPUT:
+            gate_acc = gate_acc * route_weight[:, None]
+            up_acc = up_acc * route_weight[:, None]
+
+        swiglu_vals = gate_acc * tl.sigmoid(gate_acc) * up_acc
+        if not APPLY_ROUTER_WEIGHT_ON_INPUT:
+            swiglu_vals = swiglu_vals * route_weight[:, None]
+
+        w2_t = tl.load(
+            w2_ptr
+            + expert_idx * stride_w2e
+            + offs_d[:, None] * stride_w2d
+            + offs_k[None, :] * stride_w2k,
+            mask=d_mask[:, None] & k_mask[None, :],
+            other=0.0,
+        )
+        out_acc += tl.dot(swiglu_vals.to(w2_t.dtype), w2_t)
+
+    tl.store(
+        out_ptr
+        + token_idx[:, None] * stride_om
+        + topk_slot[:, None] * stride_ot
+        + offs_k[None, :] * stride_ok,
+        out_acc,
+        mask=route_mask[:, None] & k_mask[None, :],
+    )
+
+
+def invoke_fused_moe_mega_grouped_triton_kernel(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    out_routes: torch.Tensor,
+    top_k: int,
+    apply_router_weight_on_input: bool,
+    block_m: int,
+) -> None:
+    assert hidden_states.ndim == 2
+    assert w1.ndim == 3
+    assert w2.ndim == 3
+    assert topk_weights.ndim == 2
+    assert sorted_token_ids.ndim == 1
+    assert expert_ids.ndim == 1
+    assert num_tokens_post_padded.numel() == 1
+    assert out_routes.ndim == 3
+
+    M, H = hidden_states.shape
+    _, two_d, h_w1 = w1.shape
+    _, h_w2, D = w2.shape
+    assert h_w1 == H and h_w2 == H and two_d == 2 * D
+
+    num_valid_tokens = M * top_k
+    num_tokens_post_padded_val = int(num_tokens_post_padded.item())
+    BLOCK_M = block_m
+    grid = lambda META: (
+        triton.cdiv(num_tokens_post_padded_val, BLOCK_M),
+        triton.cdiv(H, META["BLOCK_K_OUT"]),
+    )
+
+    fused_moe_mega_grouped_triton_kernel[grid](
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        out_routes,
+        H,
+        D,
+        num_valid_tokens,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        w1.stride(0),
+        w1.stride(1),
+        w1.stride(2),
+        w2.stride(0),
+        w2.stride(1),
+        w2.stride(2),
+        topk_weights.stride(0),
+        topk_weights.stride(1),
+        out_routes.stride(0),
+        out_routes.stride(1),
+        out_routes.stride(2),
+        TOPK=top_k,
+        BLOCK_M=BLOCK_M,
+        APPLY_ROUTER_WEIGHT_ON_INPUT=apply_router_weight_on_input,
+    )
+
+
+def _get_mega_group_block_m(
+    num_tokens: int,
+    num_experts: int,
+    top_k: int,
+) -> int:
+    avg_tokens_per_expert = (num_tokens * top_k) // max(num_experts, 1)
+    if avg_tokens_per_expert <= 2:
+        return 16
+    if avg_tokens_per_expert <= 8:
+        return 32
+    return 64
+
+
+def _get_or_alloc_mega_workspace(
+    device: torch.device,
+    dtype: torch.dtype,
+    num_valid_tokens: int,
+    d: int,
+) -> torch.Tensor:
+    dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+    key = (dev_idx, dtype, num_valid_tokens, d)
+    workspace = _MEGA_WORKSPACE_POOL.get(key)
+    if workspace is None:
+        workspace = torch.empty((num_valid_tokens, d), device=device, dtype=dtype)
+        _MEGA_WORKSPACE_POOL[key] = workspace
+    return workspace
+
+
+def _get_or_alloc_mega_out_routes(
+    device: torch.device,
+    dtype: torch.dtype,
+    m: int,
+    top_k: int,
+    h: int,
+) -> torch.Tensor:
+    dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+    key = (dev_idx, dtype, m, top_k, h)
+    out_routes = _MEGA_OUT_ROUTES_POOL.get(key)
+    if out_routes is None:
+        out_routes = torch.empty((m, top_k, h), device=device, dtype=dtype)
+        _MEGA_OUT_ROUTES_POOL[key] = out_routes
+    return out_routes
+
+
+def _select_mega_launch_plan(
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    h: int,
+    d: int,
+    e: int,
+    top_k: int,
+    block_m: int,
+    num_blocks: int,
+) -> tuple[int, int, int, int, int]:
+    dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+    key = (dev_idx, dtype, h, d, e, top_k, block_m)
+    cached = _MEGA_PLAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if d >= 8192:
+        block_d = 128
+    elif d >= 2048:
+        block_d = 64
+    else:
+        block_d = 32
+
+    if h >= 8192:
+        block_k_out = 256
+        block_h = 64
+    elif h >= 2048:
+        block_k_out = 128
+        block_h = 64
+    else:
+        block_k_out = 64
+        block_h = 32
+
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    waves = 3 if (e >= 128 or top_k >= 8) else 2
+    ctas_target = max(1, num_sms * waves)
+
+    num_d_blocks = triton.cdiv(d, block_d)
+    num_k_blocks = triton.cdiv(h, block_k_out)
+    persistent_ctas1 = min(ctas_target, max(1, num_blocks * num_d_blocks))
+    persistent_ctas2 = min(ctas_target, max(1, num_blocks * num_k_blocks))
+
+    plan = (block_h, block_d, block_k_out, persistent_ctas1, persistent_ctas2)
+    _MEGA_PLAN_CACHE[key] = plan
+    return plan
+
+
+@triton.jit
+def fused_moe_mega_persistent_linear1_triton_kernel(
+    hidden_ptr,
+    w1_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    workspace_ptr,
+    num_blocks,
+    num_d_blocks,
+    H,
+    D,
+    num_valid_tokens,
+    stride_hm,
+    stride_hk,
+    stride_w1e,
+    stride_w1n,
+    stride_w1k,
+    stride_twm,
+    stride_twt,
+    stride_wsm,
+    stride_wsd,
+    TOPK: tl.constexpr,
+    APPLY_ROUTER_WEIGHT_ON_INPUT: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+
+    total_tasks = num_blocks * num_d_blocks
+    task_idx = pid
+    while task_idx < total_tasks:
+        block_idx = (task_idx // num_d_blocks).to(tl.int64)
+        n_block_idx = (task_idx % num_d_blocks).to(tl.int64)
+        expert_idx = tl.load(expert_ids_ptr + block_idx).to(tl.int64)
+
+        if expert_idx >= 0:
+            offs_route = block_idx * BLOCK_M + tl.arange(0, BLOCK_M)
+            route_ids = tl.load(sorted_token_ids_ptr + offs_route).to(tl.int64)
+            route_mask = route_ids < num_valid_tokens
+
+            token_idx = tl.where(route_mask, route_ids // TOPK, 0)
+            topk_slot = tl.where(route_mask, route_ids % TOPK, 0)
+            route_weight = tl.load(
+                topk_weights_ptr + token_idx * stride_twm + topk_slot * stride_twt,
+                mask=route_mask,
+                other=0.0,
+            ).to(tl.float32)
+
+            offs_d = n_block_idx * BLOCK_D + tl.arange(0, BLOCK_D)
             d_mask = offs_d < D
 
-            gate_acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
-            up_acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+            gate_acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+            up_acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
 
             for h_start in range(0, tl.cdiv(H, BLOCK_H)):
                 offs_h = h_start * BLOCK_H + tl.arange(0, BLOCK_H)
                 h_mask = offs_h < H
 
-                h_values = tl.load(
-                    hidden_ptr + pid_m * stride_hm + offs_h * stride_hk,
-                    mask=h_mask,
+                h_vals = tl.load(
+                    hidden_ptr + token_idx[:, None] * stride_hm + offs_h[None, :] * stride_hk,
+                    mask=route_mask[:, None] & h_mask[None, :],
                     other=0.0,
-                ).to(tl.float32)
+                )
 
-                w1_gate = tl.load(
+                w1_gate_t = tl.load(
                     w1_ptr
                     + expert_idx * stride_w1e
-                    + offs_d[:, None] * stride_w1n
-                    + offs_h[None, :] * stride_w1k,
-                    mask=d_mask[:, None] & h_mask[None, :],
+                    + offs_d[None, :] * stride_w1n
+                    + offs_h[:, None] * stride_w1k,
+                    mask=h_mask[:, None] & d_mask[None, :],
                     other=0.0,
-                ).to(tl.float32)
-                w1_up = tl.load(
+                )
+                w1_up_t = tl.load(
                     w1_ptr
                     + expert_idx * stride_w1e
-                    + (offs_d + D)[:, None] * stride_w1n
-                    + offs_h[None, :] * stride_w1k,
-                    mask=d_mask[:, None] & h_mask[None, :],
+                    + (offs_d + D)[None, :] * stride_w1n
+                    + offs_h[:, None] * stride_w1k,
+                    mask=h_mask[:, None] & d_mask[None, :],
                     other=0.0,
-                ).to(tl.float32)
+                )
 
-                gate_acc += tl.sum(w1_gate * h_values[None, :], axis=1)
-                up_acc += tl.sum(w1_up * h_values[None, :], axis=1)
+                gate_acc += tl.dot(h_vals, w1_gate_t)
+                up_acc += tl.dot(h_vals, w1_up_t)
 
             if APPLY_ROUTER_WEIGHT_ON_INPUT:
-                gate_acc = gate_acc * route_weight
-                up_acc = up_acc * route_weight
+                gate_acc = gate_acc * route_weight[:, None]
+                up_acc = up_acc * route_weight[:, None]
 
-            swiglu_values = gate_acc * tl.sigmoid(gate_acc) * up_acc
+            swiglu_vals = gate_acc * tl.sigmoid(gate_acc) * up_acc
             if not APPLY_ROUTER_WEIGHT_ON_INPUT:
-                swiglu_values = swiglu_values * route_weight
+                swiglu_vals = swiglu_vals * route_weight[:, None]
 
-            w2_values = tl.load(
-                w2_ptr
-                + expert_idx * stride_w2e
-                + offs_k[:, None] * stride_w2k
-                + offs_d[None, :] * stride_w2d,
-                mask=k_mask[:, None] & d_mask[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            out_acc += tl.sum(w2_values * swiglu_values[None, :], axis=1)
+            tl.store(
+                workspace_ptr + route_ids[:, None] * stride_wsm + offs_d[None, :] * stride_wsd,
+                swiglu_vals,
+                mask=route_mask[:, None] & d_mask[None, :],
+            )
 
-    tl.store(
-        out_ptr + pid_m * stride_om + offs_k * stride_ok,
-        out_acc,
-        mask=k_mask,
+        task_idx += num_programs
+
+
+@triton.jit
+def fused_moe_mega_persistent_linear2_triton_kernel(
+    w2_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    workspace_ptr,
+    out_routes_ptr,
+    num_blocks,
+    num_k_blocks,
+    H,
+    D,
+    num_valid_tokens,
+    stride_w2e,
+    stride_w2k,
+    stride_w2d,
+    stride_wsm,
+    stride_wsd,
+    stride_orm,
+    stride_ort,
+    stride_ork,
+    TOPK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_K_OUT: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+
+    total_tasks = num_blocks * num_k_blocks
+    task_idx = pid
+    while task_idx < total_tasks:
+        block_idx = (task_idx // num_k_blocks).to(tl.int64)
+        n_block_idx = (task_idx % num_k_blocks).to(tl.int64)
+        expert_idx = tl.load(expert_ids_ptr + block_idx).to(tl.int64)
+
+        if expert_idx >= 0:
+            offs_route = block_idx * BLOCK_M + tl.arange(0, BLOCK_M)
+            route_ids = tl.load(sorted_token_ids_ptr + offs_route).to(tl.int64)
+            route_mask = route_ids < num_valid_tokens
+
+            token_idx = tl.where(route_mask, route_ids // TOPK, 0)
+            topk_slot = tl.where(route_mask, route_ids % TOPK, 0)
+
+            offs_k = n_block_idx * BLOCK_K_OUT + tl.arange(0, BLOCK_K_OUT)
+            k_mask = offs_k < H
+
+            out_acc = tl.zeros((BLOCK_M, BLOCK_K_OUT), dtype=tl.float32)
+
+            for d_start in range(0, tl.cdiv(D, BLOCK_D)):
+                offs_d = d_start * BLOCK_D + tl.arange(0, BLOCK_D)
+                d_mask = offs_d < D
+
+                swiglu_vals = tl.load(
+                    workspace_ptr + route_ids[:, None] * stride_wsm + offs_d[None, :] * stride_wsd,
+                    mask=route_mask[:, None] & d_mask[None, :],
+                    other=0.0,
+                )
+
+                w2_t = tl.load(
+                    w2_ptr
+                    + expert_idx * stride_w2e
+                    + offs_d[:, None] * stride_w2d
+                    + offs_k[None, :] * stride_w2k,
+                    mask=d_mask[:, None] & k_mask[None, :],
+                    other=0.0,
+                )
+
+                out_acc += tl.dot(swiglu_vals.to(w2_t.dtype), w2_t)
+
+            tl.store(
+                out_routes_ptr
+                + token_idx[:, None] * stride_orm
+                + topk_slot[:, None] * stride_ort
+                + offs_k[None, :] * stride_ork,
+                out_acc,
+                mask=route_mask[:, None] & k_mask[None, :],
+            )
+
+        task_idx += num_programs
+
+
+def invoke_fused_moe_mega_persistent_phased_triton_kernel(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    out_hidden_states: torch.Tensor,
+    apply_router_weight_on_input: bool,
+) -> None:
+    M, H = hidden_states.shape
+    E, two_d, h_w1 = w1.shape
+    e_w2, h_w2, D = w2.shape
+    assert h_w1 == H and h_w2 == H and e_w2 == E and two_d == 2 * D
+
+    topk_weights_contig = topk_weights.contiguous()
+    topk_ids_i32 = topk_ids.to(torch.int32).contiguous()
+    top_k = topk_ids_i32.size(1)
+
+    block_m = _get_mega_group_block_m(M, E, top_k)
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids_i32,
+        block_m,
+        E,
+        None,
     )
+    num_valid_tokens = M * top_k
+    num_blocks = int(num_tokens_post_padded.item()) // block_m
+    if num_blocks <= 0:
+        out_hidden_states.zero_()
+        return
+
+    block_h, block_d, block_k_out, persistent_ctas1, persistent_ctas2 = _select_mega_launch_plan(
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+        h=H,
+        d=D,
+        e=E,
+        top_k=top_k,
+        block_m=block_m,
+        num_blocks=num_blocks,
+    )
+
+    num_d_blocks = triton.cdiv(D, block_d)
+    num_k_blocks = triton.cdiv(H, block_k_out)
+
+    workspace = _get_or_alloc_mega_workspace(
+        hidden_states.device,
+        hidden_states.dtype,
+        num_valid_tokens,
+        D,
+    )
+    out_routes = _get_or_alloc_mega_out_routes(
+        hidden_states.device,
+        hidden_states.dtype,
+        M,
+        top_k,
+        H,
+    )
+
+    fused_moe_mega_persistent_linear1_triton_kernel[(persistent_ctas1,)](
+        hidden_states,
+        w1,
+        topk_weights_contig,
+        sorted_token_ids,
+        expert_ids,
+        workspace,
+        num_blocks,
+        num_d_blocks,
+        H,
+        D,
+        num_valid_tokens,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        w1.stride(0),
+        w1.stride(1),
+        w1.stride(2),
+        topk_weights_contig.stride(0),
+        topk_weights_contig.stride(1),
+        workspace.stride(0),
+        workspace.stride(1),
+        TOPK=top_k,
+        APPLY_ROUTER_WEIGHT_ON_INPUT=apply_router_weight_on_input,
+        BLOCK_M=block_m,
+        BLOCK_D=block_d,
+        BLOCK_H=block_h,
+    )
+
+    fused_moe_mega_persistent_linear2_triton_kernel[(persistent_ctas2,)](
+        w2,
+        sorted_token_ids,
+        expert_ids,
+        workspace,
+        out_routes,
+        num_blocks,
+        num_k_blocks,
+        H,
+        D,
+        num_valid_tokens,
+        w2.stride(0),
+        w2.stride(1),
+        w2.stride(2),
+        workspace.stride(0),
+        workspace.stride(1),
+        out_routes.stride(0),
+        out_routes.stride(1),
+        out_routes.stride(2),
+        TOPK=top_k,
+        BLOCK_M=block_m,
+        BLOCK_D=block_d,
+        BLOCK_K_OUT=block_k_out,
+    )
+
+    moe_sum(out_routes, out_hidden_states)
 
 
 def _can_use_mega_moe_triton_bf16_fp16(
@@ -1534,6 +2253,11 @@ def _can_use_mega_moe_triton_bf16_fp16(
     w1_bias: Optional[torch.Tensor],
     w2_bias: Optional[torch.Tensor],
 ) -> bool:
+    if os.getenv("FLAG_GEMS_DISABLE_MEGA_MOE_TRITON", "0") == "1":
+        return False
+    if os.getenv("FLAG_GEMS_FORCE_MEGA_MOE_TRITON", "0") == "1":
+        return True
+
     if activation != "silu":
         return False
     if hidden_states.dtype not in (torch.bfloat16, torch.float16):
@@ -1569,6 +2293,7 @@ def _can_use_mega_moe_triton_bf16_fp16(
         return False
     if w1.size(1) % 2 != 0:
         return False
+
     return True
 
 
@@ -1596,10 +2321,51 @@ def invoke_fused_moe_mega_triton_kernel(
     topk_weights_contig = topk_weights.contiguous()
     topk_ids_i32 = topk_ids.to(torch.int32).contiguous()
 
-    BLOCK_K_OUT = 64
-    BLOCK_D = 32
-    BLOCK_H = 32
-    grid = (M, triton.cdiv(H, BLOCK_K_OUT))
+    if os.getenv("FLAG_GEMS_DISABLE_PERSISTENT_MEGA_MOE_TRITON", "0") != "1":
+        invoke_fused_moe_mega_persistent_phased_triton_kernel(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights_contig,
+            topk_ids=topk_ids_i32,
+            out_hidden_states=out_hidden_states,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+        return
+
+    if os.getenv("FLAG_GEMS_USE_GROUPED_MEGA_MOE_TRITON", "0") == "1":
+        top_k = topk_ids_i32.size(1)
+        block_m = _get_mega_group_block_m(M, E, top_k)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids_i32,
+            block_m,
+            E,
+            None,
+        )
+        out_routes = torch.empty(
+            (M, top_k, H),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        invoke_fused_moe_mega_grouped_triton_kernel(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights_contig,
+            sorted_token_ids=sorted_token_ids,
+            expert_ids=expert_ids,
+            num_tokens_post_padded=num_tokens_post_padded,
+            out_routes=out_routes,
+            top_k=top_k,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            block_m=block_m,
+        )
+        moe_sum(out_routes, out_hidden_states)
+        return
+
+    out_hidden_states.zero_()
+
+    grid = lambda META: (M * topk_ids_i32.size(1) * triton.cdiv(D, META["BLOCK_D"]),)
 
     fused_moe_mega_triton_kernel[grid](
         hidden_states,
@@ -1625,11 +2391,8 @@ def invoke_fused_moe_mega_triton_kernel(
         topk_ids_i32.stride(1),
         out_hidden_states.stride(0),
         out_hidden_states.stride(1),
-        TOPK=topk_ids.size(1),
+        TOPK=topk_ids_i32.size(1),
         APPLY_ROUTER_WEIGHT_ON_INPUT=apply_router_weight_on_input,
-        BLOCK_K_OUT=BLOCK_K_OUT,
-        BLOCK_D=BLOCK_D,
-        BLOCK_H=BLOCK_H,
     )
 
 
@@ -1841,15 +2604,21 @@ def fused_experts_impl(
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         if use_mega_moe_triton_path:
+            mega_out = torch.empty(
+                (tokens_in_chunk, K),
+                device=curr_hidden_states.device,
+                dtype=out_hidden_states.dtype,
+            )
             invoke_fused_moe_mega_triton_kernel(
                 hidden_states=curr_hidden_states,
                 w1=w1,
                 w2=w2,
                 topk_weights=curr_topk_weights,
                 topk_ids=curr_topk_ids,
-                out_hidden_states=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                out_hidden_states=mega_out,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+            out_hidden_states[begin_chunk_idx:end_chunk_idx].copy_(mega_out)
             continue
 
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
