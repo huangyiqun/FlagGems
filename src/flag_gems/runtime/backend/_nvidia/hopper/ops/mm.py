@@ -156,7 +156,7 @@ def mm_kernel_general(
         # column-major
         # b_desc = tl.make_tensor_descriptor(
         #     B,
-        #     shape = [N, K],``
+        #     shape = [N, K],
         #     strides = [K, 1],
         #     block_shape = [BLOCK_N, BLOCK_K],
         # )
