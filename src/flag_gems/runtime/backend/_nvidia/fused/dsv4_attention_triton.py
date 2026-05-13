@@ -7,6 +7,9 @@ import triton.language as tl
 
 from flag_gems.fused.flashmla_sparse import triton_flash_mla_sparse_fwd
 from flag_gems.runtime import torch_device_fn
+from flag_gems.runtime.backend._nvidia.hopper.ops.w8a8_block_fp8_matmul import (
+    w8a8_block_fp8_matmul,
+)
 
 
 _INT32_MAX = 2147483647
@@ -929,6 +932,47 @@ def dsv4_flash_mla_sparse_decode(
     return output, lse
 
 
+def dsv4_fp8_einsum(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+    recipe: list[int],
+) -> None:
+    if equation != "bhr,hdr->bhd":
+        raise NotImplementedError(f"unsupported equation: {equation}")
+    if tuple(recipe) != (1, 128, 128):
+        raise NotImplementedError(f"unsupported recipe: {recipe}")
+
+    assert a.ndim == 3 and b.ndim == 3 and out.ndim == 3
+    assert a.dtype == torch.float8_e4m3fn and b.dtype == torch.float8_e4m3fn
+    assert a_scale.dtype == torch.float32 and b_scale.dtype == torch.float32
+    assert out.dtype == torch.bfloat16
+
+    batch, num_groups, k_dim = a.shape
+    b_groups, n_dim, b_k_dim = b.shape
+    assert num_groups == b_groups
+    assert k_dim == b_k_dim
+    assert out.shape == (batch, num_groups, n_dim)
+    assert k_dim % 128 == 0 and n_dim % 128 == 0
+    assert a_scale.shape == (batch, num_groups, k_dim // 128)
+    assert b_scale.shape == (num_groups, n_dim // 128, k_dim // 128)
+
+    block_size = [128, 128]
+    for group_idx in range(num_groups):
+        out_group = w8a8_block_fp8_matmul(
+            a[:, group_idx, :],
+            b[group_idx],
+            a_scale[:, group_idx, :],
+            b_scale[group_idx],
+            block_size,
+            output_dtype=out.dtype,
+        )
+        out[:, group_idx, :].copy_(out_group)
+
+
 def dsv4_attention_triton(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -1008,13 +1052,28 @@ def dsv4_attention_triton(
     raise ValueError("Either prefill_indices or decode_indices must be provided.")
 
 
+def dsv4_vllm_deepseek_v4_attention(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    from vllm.forward_context import get_forward_context
+
+    forward_context = get_forward_context()
+    layer = forward_context.no_compile_layers[layer_name]
+    layer.attention_impl(hidden_states, positions, out)
+
+
 __all__ = [
     "dsv4_attention_triton",
     "dsv4_compute_global_topk_indices_and_lens",
     "dsv4_combine_topk_swa_indices",
     "dsv4_dequantize_and_gather_k_cache",
+    "dsv4_fp8_einsum",
     "dsv4_flash_mla_sparse_decode",
     "dsv4_flash_mla_sparse_prefill",
     "dsv4_fused_q_kv_rmsnorm",
     "dsv4_qnorm_rope_kv_rope_quant_insert",
+    "dsv4_vllm_deepseek_v4_attention",
 ]
