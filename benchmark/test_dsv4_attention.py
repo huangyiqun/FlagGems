@@ -36,6 +36,19 @@ except ImportError:
     VLLM_AVAILABLE = False
 
 
+def _has_hopper_tl_float8e4nv() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        major, _ = torch.cuda.get_device_capability()
+    except Exception:
+        return False
+    return major == 9
+
+
+HAS_HOPPER_TL_FLOAT8E4NV = _has_hopper_tl_float8e4nv()
+
+
 def _build_cos_sin_cache(max_pos: int, rope_dim: int, device: str):
     half = rope_dim // 2
     pos = torch.arange(max_pos, device=device, dtype=torch.float32).unsqueeze(1)
@@ -237,7 +250,8 @@ class DSV4DecodeBenchmark(base.Benchmark):
 
 @pytest.mark.dsv4_attention_prefill
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="DSV4 benchmark requires CUDA"
+    not HAS_HOPPER_TL_FLOAT8E4NV,
+    reason="DSV4 benchmarks require NVIDIA Hopper (SM90) with tl.float8e4nv support",
 )
 def test_dsv4_attention_prefill_benchmark():
     bench = DSV4PrefillBenchmark(_build_prefill_case())
@@ -252,7 +266,8 @@ def test_dsv4_attention_prefill_benchmark():
 
 @pytest.mark.dsv4_attention_decode
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="DSV4 benchmark requires CUDA"
+    not HAS_HOPPER_TL_FLOAT8E4NV,
+    reason="DSV4 benchmarks require NVIDIA Hopper (SM90) with tl.float8e4nv support",
 )
 def test_dsv4_attention_decode_benchmark():
     bench = DSV4DecodeBenchmark(_build_decode_case())
@@ -267,7 +282,8 @@ def test_dsv4_attention_decode_benchmark():
 
 @pytest.mark.dsv4_attention_prefill
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="DSV4 benchmark requires CUDA"
+    not HAS_HOPPER_TL_FLOAT8E4NV,
+    reason="DSV4 benchmarks require NVIDIA Hopper (SM90) with tl.float8e4nv support",
 )
 @pytest.mark.skipif(not VLLM_AVAILABLE, reason="vLLM is not installed")
 def test_dsv4_attention_prefill_perf_vs_vllm():
@@ -321,7 +337,8 @@ def test_dsv4_attention_prefill_perf_vs_vllm():
 
 @pytest.mark.dsv4_attention_decode
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="DSV4 benchmark requires CUDA"
+    not HAS_HOPPER_TL_FLOAT8E4NV,
+    reason="DSV4 benchmarks require NVIDIA Hopper (SM90) with tl.float8e4nv support",
 )
 @pytest.mark.skipif(not VLLM_AVAILABLE, reason="vLLM is not installed")
 def test_dsv4_subops_perf_vs_vllm():
