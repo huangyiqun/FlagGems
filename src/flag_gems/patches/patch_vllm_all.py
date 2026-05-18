@@ -462,9 +462,7 @@ def custom_fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     eps: float,
     block_size: int,
 ) -> None:
-    from flag_gems.fused.dsv4_attention import (
-        dsv4_qnorm_rope_kv_rope_quant_insert,
-    )
+    from flag_gems.fused.dsv4_attention import dsv4_qnorm_rope_kv_rope_quant_insert
 
     dsv4_qnorm_rope_kv_rope_quant_insert(
         q=q,
@@ -484,9 +482,7 @@ def custom_deepseek_v4_attention(
     out: torch.Tensor,
     layer_name: str,
 ) -> None:
-    from flag_gems.fused.dsv4_attention import (
-        dsv4_vllm_deepseek_v4_attention,
-    )
+    from flag_gems.fused.dsv4_attention import dsv4_vllm_deepseek_v4_attention
 
     dsv4_vllm_deepseek_v4_attention(hidden_states, positions, out, layer_name)
 
@@ -500,9 +496,7 @@ def custom_deepseek_v4_fp8_einsum(
     equation: str,
     recipe: list[int],
 ) -> None:
-    from flag_gems.fused.dsv4_attention import (
-        dsv4_fp8_einsum,
-    )
+    from flag_gems.fused.dsv4_attention import dsv4_fp8_einsum
 
     dsv4_fp8_einsum(a, a_scale, b, b_scale, out, equation, recipe)
 
@@ -756,11 +750,11 @@ def apply_gems_patches_to_vllm(verbose=True):
 
     from flag_gems.fused.dsv4_attention import (
         dsv4_attention_triton,
-        dsv4_flash_mla_sparse_decode,
-        dsv4_flash_mla_sparse_prefill,
         dsv4_combine_topk_swa_indices,
         dsv4_compute_global_topk_indices_and_lens,
         dsv4_dequantize_and_gather_k_cache,
+        dsv4_flash_mla_sparse_decode,
+        dsv4_flash_mla_sparse_prefill,
         dsv4_fp8_einsum,
         dsv4_fused_q_kv_rmsnorm,
         dsv4_qnorm_rope_kv_rope_quant_insert,
