@@ -22,6 +22,8 @@ from flag_gems.fused.mhc.mhc_bwd import mhc_bwd, mhc_bwd_ref, sinkhorn_forward
 from flag_gems.fused.mhc.mhc_post import mhc_post, mhc_post_ref
 from flag_gems.fused.mhc.mhc_pre import mhc_pre, mhc_pre_ref
 
+from . import accuracy_utils as utils
+
 
 def generate_mhc_post_data(
     n: int, h: int, hc_mult: int = 4, device: str = flag_gems.device
@@ -59,7 +61,7 @@ def test_mhc_post_vs_ref(n, h, hc_mult):
     out_triton = mhc_post(**data)
     data_cpu = {k: v.cpu() for k, v in data.items()}
     out_ref = mhc_post_ref(**data_cpu)
-    torch.testing.assert_close(out_triton.cpu(), out_ref, rtol=1e-2, atol=1e-2)
+    utils.gems_assert_close(out_triton.cpu(), out_ref, out_triton.dtype, atol=1e-2)
 
 
 def generate_mhc_split_sinkhorn_data(
@@ -100,9 +102,9 @@ def test_mhc_split_sinkhorn(batch, seqlen, hc_mult):
     pre_triton, post_triton, comb_triton = hc_split_sinkhorn(**data)
     pre_dv, post_dv, comb_dv = mhc_split_sinkhorn_torch_ref(**data)
 
-    torch.testing.assert_close(pre_triton, pre_dv, rtol=1e-4, atol=1e-4)
-    torch.testing.assert_close(post_triton, post_dv, rtol=1e-4, atol=1e-4)
-    torch.testing.assert_close(comb_triton, comb_dv, rtol=1e-4, atol=1e-4)
+    utils.gems_assert_close(pre_triton, pre_dv, pre_triton.dtype, atol=1e-4)
+    utils.gems_assert_close(post_triton, post_dv, post_triton.dtype, atol=1e-4)
+    utils.gems_assert_close(comb_triton, comb_dv, comb_triton.dtype, atol=1e-4)
 
 
 MHC_PRE_CONFIGS = list(
@@ -169,9 +171,9 @@ def test_mhc_pre_vs_ref(n, hidden_size, hc_mult):
     }
     post_ref, comb_ref, li_ref = mhc_pre_ref(**data_cpu)
 
-    torch.testing.assert_close(post_triton.cpu(), post_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(comb_triton.cpu(), comb_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(li_triton.cpu(), li_ref, rtol=1e-2, atol=1e-2)
+    utils.gems_assert_close(post_triton.cpu(), post_ref, post_triton.dtype, atol=1e-2)
+    utils.gems_assert_close(comb_triton.cpu(), comb_ref, comb_triton.dtype, atol=1e-2)
+    utils.gems_assert_close(li_triton.cpu(), li_ref, li_triton.dtype, atol=1e-2)
 
 
 MHC_BWD_CONFIGS = list(
@@ -217,7 +219,7 @@ def test_mhc_bwd_vs_ref(seqlen, n_stream, sinkhorn_iters):
     out_triton = mhc_bwd(R, dR)
     out_ref = mhc_bwd_ref(R.cpu(), dR.cpu())
 
-    torch.testing.assert_close(out_triton.cpu(), out_ref, rtol=1e-4, atol=1e-4)
+    utils.gems_assert_close(out_triton.cpu(), out_ref, out_triton.dtype, atol=1e-4)
 
 
 MHC_HC_HEAD_FUSED_CONFIGS = [
@@ -284,8 +286,8 @@ def test_hc_head_fused_kernel_vs_ref(n, hidden_size, hc_mult, dtype):
         torch.float16: (2e-2, 2e-2),
         torch.bfloat16: (2e-2, 2e-2),
     }
-    rtol, atol = tol_map[dtype]
+    _, atol = tol_map[dtype]
 
     out_triton = hc_head_fused_kernel(**data)
     out_ref = hc_head_fused_kernel_ref(**data_ref)
-    torch.testing.assert_close(out_triton, out_ref, rtol=rtol, atol=atol)
+    utils.gems_assert_close(out_triton, out_ref, dtype, atol=atol)
