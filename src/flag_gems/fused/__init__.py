@@ -53,6 +53,17 @@ from flag_gems.fused.sparse_attention import sparse_attn_triton
 from flag_gems.fused.swiglu import dswiglu, swiglu
 from flag_gems.fused.topk_softmax import topk_softmax
 from flag_gems.fused.weight_norm import weight_norm
+from flag_gems.fused.dsv4_attention import (
+    dsv4_attention_triton,
+    dsv4_combine_topk_swa_indices,
+    dsv4_compute_global_topk_indices_and_lens,
+    dsv4_dequantize_and_gather_k_cache,
+    dsv4_flash_mla_sparse_decode,
+    dsv4_flash_mla_sparse_prefill,
+    dsv4_fp8_einsum,
+    dsv4_fused_q_kv_rmsnorm,
+    dsv4_qnorm_rope_kv_rope_quant_insert,
+)
 
 __all__ = [
     "apply_repetition_penalties",
@@ -66,6 +77,15 @@ __all__ = [
     "dispatch_fused_moe_kernel",
     "dgeglu",
     "dreglu",
+    "dsv4_attention_triton",
+    "dsv4_combine_topk_swa_indices",
+    "dsv4_compute_global_topk_indices_and_lens",
+    "dsv4_dequantize_and_gather_k_cache",
+    "dsv4_fp8_einsum",
+    "dsv4_flash_mla_sparse_decode",
+    "dsv4_flash_mla_sparse_prefill",
+    "dsv4_fused_q_kv_rmsnorm",
+    "dsv4_qnorm_rope_kv_rope_quant_insert",
     "dswiglu",
     "flash_mla",
     "flash_mla_sparse_fwd",
