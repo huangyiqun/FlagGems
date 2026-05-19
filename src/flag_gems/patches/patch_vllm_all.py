@@ -764,6 +764,7 @@ def apply_gems_patches_to_vllm(verbose=True):
     dsv4_module_patches = [
         ("dsv4_attention_triton", dsv4_attention_triton),
         ("dsv4_flash_mla_sparse_prefill", dsv4_flash_mla_sparse_prefill),
+        ("flash_mla_sparse_fwd", dsv4_flash_mla_sparse_prefill),
         ("dsv4_flash_mla_sparse_decode", dsv4_flash_mla_sparse_decode),
         ("dsv4_qnorm_rope_kv_rope_quant_insert", dsv4_qnorm_rope_kv_rope_quant_insert),
         ("dsv4_vllm_deepseek_v4_attention", dsv4_vllm_deepseek_v4_attention),
@@ -786,6 +787,7 @@ def apply_gems_patches_to_vllm(verbose=True):
             ),
             ("dequantize_and_gather_k_cache", dsv4_dequantize_and_gather_k_cache),
             ("fused_q_kv_rmsnorm", dsv4_fused_q_kv_rmsnorm),
+            ("flash_mla_sparse_fwd", dsv4_flash_mla_sparse_prefill),
         ]
         for symbol_name, fn in dsv4_ops_patches:
             setattr(dsv4_ops, symbol_name, fn)

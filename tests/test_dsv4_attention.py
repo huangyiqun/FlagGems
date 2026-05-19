@@ -580,7 +580,7 @@ def test_dsv4_vs_vllm_prefill_accuracy():
     torch.manual_seed(123)
     device = "cuda"
     sq, h, dt = 32, 64, 576
-    skv, topk = 128, 64
+    skv, topk = 128, 128
     q = torch.randn((sq, h, dt), device=device, dtype=torch.bfloat16)
     kv = torch.randn((skv, 1, dt), device=device, dtype=torch.bfloat16)
     indices = torch.randint(0, skv, (sq, 1, topk), device=device, dtype=torch.int32)
@@ -606,16 +606,22 @@ def test_dsv4_vs_vllm_prefill_accuracy():
             pytest.skip(f"flash_mla_sparse_fwd launch signature mismatch: {exc}")
         raise
 
-    vl_out, vl_max, vl_lse = vllm_flash_mla_sparse_fwd(
-        q,
-        kv,
-        indices,
-        sm_scale,
-        d_v=512,
-        attn_sink=attn_sink,
-        topk_length=topk_length,
-        out=out_vl,
-    )
+    try:
+        vl_out, vl_max, vl_lse = vllm_flash_mla_sparse_fwd(
+            q,
+            kv,
+            indices,
+            sm_scale,
+            d_v=512,
+            attn_sink=attn_sink,
+            topk_length=topk_length,
+            out=out_vl,
+        )
+    except RuntimeError as exc:
+        err = str(exc)
+        if "params.topk % (2*B_TOPK) == 0" in err:
+            pytest.skip(f"vLLM FlashMLA sparse prefill kernel constraint hit: {exc}")
+        raise
     torch.testing.assert_close(fg_out, vl_out, atol=5e-2, rtol=5e-2)
     torch.testing.assert_close(fg_max, vl_max, atol=5e-2, rtol=5e-2)
     torch.testing.assert_close(fg_lse, vl_lse, atol=5e-2, rtol=5e-2)

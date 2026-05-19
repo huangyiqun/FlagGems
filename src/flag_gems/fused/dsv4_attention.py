@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from flag_gems.fused.flashmla_sparse import triton_flash_mla_sparse_fwd
+from flag_gems.fused.flashmla_sparse import flash_mla_sparse_fwd as _flash_mla_sparse_fwd_impl
 from flag_gems.runtime import torch_device_fn
 from flag_gems.runtime.backend._nvidia.hopper.ops.w8a8_block_fp8_matmul import (
     w8a8_block_fp8_matmul,
@@ -644,7 +644,7 @@ def dsv4_flash_mla_sparse_prefill(
     topk_length: Optional[torch.Tensor] = None,
     out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """FlagGems-only sparse prefill wrapper with vLLM-style optional out."""
+    """Sparse prefill wrapper aligned with vLLM flash_mla_sparse_fwd API."""
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
     sq, h, dt = q.shape
     skv, vg, _ = kv.shape
@@ -660,85 +660,34 @@ def dsv4_flash_mla_sparse_prefill(
         assert topk_length.shape == (sq,)
 
     _, _, topk = indices.shape
-    # The shared FlagGems sparse kernel has a non-causal loop skip keyed on
-    # SKV. vLLM sparse prefill must still process every top-k slot when
-    # topk > skv, so pass a logical SKV large enough for the loop and sanitize
-    # physically out-of-range indices before the launch.
-    kernel_skv = max(skv, topk)
+    kv_for_kernel = kv
     indices_for_kernel = indices
-    if kernel_skv != skv:
+    if topk > skv:
         invalid = (indices < 0) | (indices >= skv)
         indices_for_kernel = torch.where(
             invalid,
             torch.full_like(indices, -1),
             indices,
         ).contiguous()
-    td = dt - d_v
-    dp = triton.next_power_of_2(d_v)
-    tdp = 0 if td == 0 else triton.next_power_of_2(td)
-    group = h // vg
-    bh = max(16, min(32, triton.next_power_of_2(group)))
-    nh = triton.cdiv(group, bh)
-    bk = 16
-    if out is None:
-        output = torch.zeros((sq, h, d_v), device=q.device, dtype=q.dtype)
-    else:
+        kv_padding = torch.zeros((topk - skv, vg, dt), device=kv.device, dtype=kv.dtype)
+        kv_for_kernel = torch.cat([kv, kv_padding], dim=0).contiguous()
+
+    with torch_device_fn.device(q.device):
+        output, max_logits, lse = _flash_mla_sparse_fwd_impl(
+            q,
+            kv_for_kernel,
+            indices_for_kernel,
+            sm_scale,
+            d_v=d_v,
+            attn_sink=attn_sink,
+            topk_length=topk_length,
+        )
+
+    if out is not None:
         assert out.shape == (sq, h, d_v)
         assert out.dtype == q.dtype
+        out.copy_(output)
         output = out
-        output.zero_()
-    max_logits = torch.full(
-        (sq, h), float("-inf"), device=q.device, dtype=torch.float32
-    )
-    lse = torch.full((sq, h), float("-inf"), device=q.device, dtype=torch.float32)
-    q_idx_i64 = q.numel() > _INT32_MAX
-    output_idx_i64 = output.numel() > _INT32_MAX
-    grid = (sq, vg * nh, 1)
-    with torch_device_fn.device(q.device):
-        triton_flash_mla_sparse_fwd[grid](
-            q,
-            kv,
-            indices_for_kernel,
-            attn_sink,
-            topk_length,
-            sm_scale,
-            output,
-            max_logits,
-            lse,
-            q.stride(1),
-            q.stride(0),
-            q.stride(2),
-            kv.stride(1),
-            kv.stride(0),
-            kv.stride(2),
-            indices_for_kernel.stride(1),
-            indices_for_kernel.stride(0),
-            indices_for_kernel.stride(2),
-            attn_sink.stride(0) if attn_sink is not None else 0,
-            topk_length.stride(0) if topk_length is not None else 0,
-            output.stride(1),
-            output.stride(0),
-            output.stride(2),
-            max_logits.stride(1),
-            max_logits.stride(0),
-            lse.stride(1),
-            lse.stride(0),
-            sq,
-            kernel_skv,
-            topk,
-            d_v,
-            td,
-            dp,
-            tdp,
-            group,
-            bk,
-            bh,
-            False,
-            q_idx_i64,
-            output_idx_i64,
-            attn_sink is not None,
-            topk_length is not None,
-        )
     return output, max_logits, lse
 
 
@@ -1104,7 +1053,18 @@ def dsv4_vllm_deepseek_v4_attention(
     layer.attention_impl(hidden_states, positions, out)
 
 
+# vLLM-compatible aliases
+fused_q_kv_rmsnorm = dsv4_fused_q_kv_rmsnorm
+dequantize_and_gather_k_cache = dsv4_dequantize_and_gather_k_cache
+compute_global_topk_indices_and_lens = dsv4_compute_global_topk_indices_and_lens
+combine_topk_swa_indices = dsv4_combine_topk_swa_indices
+flash_mla_sparse_fwd = dsv4_flash_mla_sparse_prefill
+
+
 __all__ = [
+    "combine_topk_swa_indices",
+    "compute_global_topk_indices_and_lens",
+    "dequantize_and_gather_k_cache",
     "dsv4_attention_triton",
     "dsv4_compute_global_topk_indices_and_lens",
     "dsv4_combine_topk_swa_indices",
@@ -1115,4 +1075,6 @@ __all__ = [
     "dsv4_fused_q_kv_rmsnorm",
     "dsv4_qnorm_rope_kv_rope_quant_insert",
     "dsv4_vllm_deepseek_v4_attention",
+    "flash_mla_sparse_fwd",
+    "fused_q_kv_rmsnorm",
 ]

@@ -142,20 +142,6 @@ def _build_decode_case(device: str = "cuda"):
     }
 
 
-def _bench_ms(fn, *args, warmup=10, iters=50, **kwargs):
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn(*args, **kwargs)
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters
-
-
 def _prefill_op(q, kv, indices, sm_scale, attn_sink, topk_length):
     return dsv4_flash_mla_sparse_prefill(
         q,
@@ -248,6 +234,362 @@ class DSV4DecodeBenchmark(base.Benchmark):
         )
 
 
+def _prefill_fg_vs_vllm_op(
+    q,
+    kv,
+    indices,
+    sm_scale,
+    attn_sink,
+    topk_length,
+    fg_out,
+    vl_out,
+):
+    _ = vl_out
+    return dsv4_flash_mla_sparse_prefill(
+        q,
+        kv,
+        indices,
+        sm_scale,
+        d_v=512,
+        attn_sink=attn_sink,
+        topk_length=topk_length,
+        out=fg_out,
+    )
+
+
+def _prefill_vllm_vs_fg_op(
+    q,
+    kv,
+    indices,
+    sm_scale,
+    attn_sink,
+    topk_length,
+    fg_out,
+    vl_out,
+):
+    _ = fg_out
+    return vllm_flash_mla_sparse_fwd(
+        q,
+        kv,
+        indices,
+        sm_scale,
+        d_v=512,
+        attn_sink=attn_sink,
+        topk_length=topk_length,
+        out=vl_out,
+    )
+
+
+def _rms_fg_vs_vllm_op(qr, kv, q_weight, kv_weight, eps):
+    return dsv4_fused_q_kv_rmsnorm(qr, kv, q_weight, kv_weight, eps)
+
+
+def _rms_vllm_vs_fg_op(qr, kv, q_weight, kv_weight, eps):
+    return vllm_fused_q_kv_rmsnorm(qr, kv, q_weight, kv_weight, eps)
+
+
+def _gather_fg_vs_vllm_op(
+    out_fg,
+    out_vl,
+    cache,
+    seq_lens,
+    gather_lens,
+    block_table,
+    block_size,
+    offset,
+):
+    _ = out_vl
+    return dsv4_dequantize_and_gather_k_cache(
+        out_fg,
+        cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset=offset,
+        rope_dim=64,
+        nope_dim=512,
+    )
+
+
+def _gather_vllm_vs_fg_op(
+    out_fg,
+    out_vl,
+    cache,
+    seq_lens,
+    gather_lens,
+    block_table,
+    block_size,
+    offset,
+):
+    _ = out_fg
+    return vllm_dequantize_and_gather_k_cache(
+        out_vl,
+        cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+    )
+
+
+def _global_fg_vs_vllm_op(topk_indices, token_to_req, blk_tbl, block_size, valid):
+    return dsv4_compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req,
+        blk_tbl,
+        block_size,
+        valid,
+    )
+
+
+def _global_vllm_vs_fg_op(topk_indices, token_to_req, blk_tbl, block_size, valid):
+    return vllm_compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req,
+        blk_tbl,
+        block_size,
+        valid,
+    )
+
+
+def _combine_fg_vs_vllm_op(
+    topk2,
+    query_start_loc,
+    seq_lens2,
+    gather_lens2,
+    window_size,
+    compress_ratio,
+    topk,
+    M,
+    N,
+):
+    return dsv4_combine_topk_swa_indices(
+        topk2,
+        query_start_loc,
+        seq_lens2,
+        gather_lens2,
+        window_size,
+        compress_ratio,
+        topk,
+        M,
+        N,
+    )
+
+
+def _combine_vllm_vs_fg_op(
+    topk2,
+    query_start_loc,
+    seq_lens2,
+    gather_lens2,
+    window_size,
+    compress_ratio,
+    topk,
+    M,
+    N,
+):
+    return vllm_combine_topk_swa_indices(
+        topk2,
+        query_start_loc,
+        seq_lens2,
+        gather_lens2,
+        window_size,
+        compress_ratio,
+        topk,
+        M,
+        N,
+    )
+
+
+class DSV4PrefillVsVLLMBenchmark(base.Benchmark):
+    def __init__(self, case):
+        super().__init__(
+            "dsv4_flash_mla_sparse_prefill_vs_vllm",
+            _prefill_vllm_vs_fg_op,
+            [torch.bfloat16],
+            gems_op=_prefill_fg_vs_vllm_op,
+        )
+        self.case = case
+        self.case["fg_out"] = torch.empty(
+            (self.case["q"].shape[0], self.case["q"].shape[1], 512),
+            device=self.case["q"].device,
+            dtype=torch.bfloat16,
+        )
+        self.case["vl_out"] = torch.empty_like(self.case["fg_out"])
+
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = []
+
+    def get_input_iter(self, dtype):
+        _ = dtype
+        yield (
+            self.case["q"],
+            self.case["kv"],
+            self.case["indices"],
+            self.case["sm_scale"],
+            self.case["attn_sink"],
+            self.case["topk_length"],
+            self.case["fg_out"],
+            self.case["vl_out"],
+        )
+
+
+class DSV4RMSNormVsVLLMBenchmark(base.Benchmark):
+    def __init__(self, case):
+        super().__init__(
+            "dsv4_fused_q_kv_rmsnorm_vs_vllm",
+            _rms_vllm_vs_fg_op,
+            [torch.bfloat16],
+            gems_op=_rms_fg_vs_vllm_op,
+        )
+        self.case = case
+
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = []
+
+    def get_input_iter(self, dtype):
+        _ = dtype
+        yield (
+            self.case["qr"],
+            self.case["kv"],
+            self.case["q_weight"],
+            self.case["kv_weight"],
+            self.case["eps"],
+        )
+
+
+class DSV4GatherVsVLLMBenchmark(base.Benchmark):
+    def __init__(self, case):
+        super().__init__(
+            "dsv4_dequantize_and_gather_k_cache_vs_vllm",
+            _gather_vllm_vs_fg_op,
+            [torch.bfloat16],
+            gems_op=_gather_fg_vs_vllm_op,
+        )
+        self.case = case
+
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = []
+
+    def get_input_iter(self, dtype):
+        _ = dtype
+        yield (
+            self.case["out_fg"],
+            self.case["out_vl"],
+            self.case["cache"],
+            self.case["seq_lens"],
+            self.case["gather_lens"],
+            self.case["block_table"],
+            self.case["block_size"],
+            self.case["offset"],
+        )
+
+
+class DSV4GlobalTopkVsVLLMBenchmark(base.Benchmark):
+    def __init__(self, case):
+        super().__init__(
+            "dsv4_compute_global_topk_indices_and_lens_vs_vllm",
+            _global_vllm_vs_fg_op,
+            [torch.bfloat16],
+            gems_op=_global_fg_vs_vllm_op,
+        )
+        self.case = case
+
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = []
+
+    def get_input_iter(self, dtype):
+        _ = dtype
+        yield (
+            self.case["topk_indices"],
+            self.case["token_to_req"],
+            self.case["blk_tbl"],
+            self.case["block_size"],
+            self.case["valid"],
+        )
+
+
+class DSV4CombineTopkVsVLLMBenchmark(base.Benchmark):
+    def __init__(self, case):
+        super().__init__(
+            "dsv4_combine_topk_swa_indices_vs_vllm",
+            _combine_vllm_vs_fg_op,
+            [torch.bfloat16],
+            gems_op=_combine_fg_vs_vllm_op,
+        )
+        self.case = case
+
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = []
+
+    def get_input_iter(self, dtype):
+        _ = dtype
+        yield (
+            self.case["topk2"],
+            self.case["query_start_loc"],
+            self.case["seq_lens2"],
+            self.case["gather_lens2"],
+            self.case["window_size"],
+            self.case["compress_ratio"],
+            self.case["topk"],
+            self.case["M"],
+            self.case["N"],
+        )
+
+
+def _build_subops_case(device: str = "cuda"):
+    torch.manual_seed(2026)
+    case = {
+        "qr": torch.randn((128, 64 * 576), device=device, dtype=torch.bfloat16),
+        "kv": torch.randn((128, 576), device=device, dtype=torch.bfloat16),
+        "q_weight": torch.randn((64 * 576,), device=device, dtype=torch.bfloat16),
+        "kv_weight": torch.randn((576,), device=device, dtype=torch.bfloat16),
+        "eps": 1e-6,
+    }
+
+    cache = _build_decode_cache(512, 64, 576, 64, device)
+    case.update(
+        {
+            "cache": cache,
+            "out_fg": torch.empty((1, 512, 576), device=device, dtype=torch.bfloat16),
+            "out_vl": torch.empty((1, 512, 576), device=device, dtype=torch.bfloat16),
+            "seq_lens": torch.tensor([512], device=device, dtype=torch.int32),
+            "gather_lens": torch.tensor([512], device=device, dtype=torch.int32),
+            "block_table": torch.tensor(
+                [[i for i in range(8)]], device=device, dtype=torch.int32
+            ),
+            "block_size": 64,
+            "offset": 0,
+        }
+    )
+
+    case.update(
+        {
+            "topk_indices": torch.randint(0, 256, (256, 64), device=device, dtype=torch.int32),
+            "token_to_req": torch.randint(0, 2, (256,), device=device, dtype=torch.int32),
+            "blk_tbl": torch.randint(0, 64, (2, 64), device=device, dtype=torch.int32),
+            "valid": torch.randint(0, 2, (256,), device=device, dtype=torch.int32),
+        }
+    )
+
+    case.update(
+        {
+            "query_start_loc": torch.tensor([0, 128, 256], device=device, dtype=torch.int32),
+            "seq_lens2": torch.tensor([1024, 1024], device=device, dtype=torch.int32),
+            "gather_lens2": torch.tensor([512, 512], device=device, dtype=torch.int32),
+            "topk2": torch.randint(0, 256, (256, 64), device=device, dtype=torch.int32),
+            "window_size": 64,
+            "compress_ratio": 2,
+            "topk": 64,
+            "M": 256,
+            "N": 512,
+        }
+    )
+
+    return case
+
+
 @pytest.mark.dsv4_attention_prefill
 @pytest.mark.skipif(
     not HAS_HOPPER_TL_FLOAT8E4NV,
@@ -291,48 +633,16 @@ def test_dsv4_attention_prefill_perf_vs_vllm():
     if not supported:
         pytest.skip(reason or "vLLM FlashMLA sparse is not supported")
 
-    case = _build_prefill_case()
-    fg_out = torch.empty(
-        (case["q"].shape[0], case["q"].shape[1], 512),
-        device="cuda",
-        dtype=torch.bfloat16,
-    )
-    vl_out = torch.empty_like(fg_out)
-
-    def fg_fn():
-        return dsv4_flash_mla_sparse_prefill(
-            case["q"],
-            case["kv"],
-            case["indices"],
-            case["sm_scale"],
-            d_v=512,
-            attn_sink=case["attn_sink"],
-            topk_length=case["topk_length"],
-            out=fg_out,
-        )
-
-    def vl_fn():
-        return vllm_flash_mla_sparse_fwd(
-            case["q"],
-            case["kv"],
-            case["indices"],
-            case["sm_scale"],
-            d_v=512,
-            attn_sink=case["attn_sink"],
-            topk_length=case["topk_length"],
-            out=vl_out,
-        )
-
+    bench = DSV4PrefillVsVLLMBenchmark(_build_prefill_case())
     try:
-        fg_ms = _bench_ms(fg_fn)
-    except TypeError as exc:
-        if "BK" in str(exc):
+        bench.run()
+    except BaseException as exc:
+        err = str(exc)
+        if "multiple values" in err and "BK" in err:
             pytest.skip(f"flash_mla_sparse_fwd launch signature mismatch: {exc}")
+        if "params.topk % (2*B_TOPK) == 0" in err:
+            pytest.skip(f"vLLM FlashMLA sparse prefill kernel constraint hit: {exc}")
         raise
-    vl_ms = _bench_ms(vl_fn)
-
-    print(f"[dsv4 prefill perf] flaggems={fg_ms:.4f}ms, vllm={vl_ms:.4f}ms")
-    assert fg_ms > 0 and vl_ms > 0
 
 
 @pytest.mark.dsv4_attention_decode
@@ -342,117 +652,8 @@ def test_dsv4_attention_prefill_perf_vs_vllm():
 )
 @pytest.mark.skipif(not VLLM_AVAILABLE, reason="vLLM is not installed")
 def test_dsv4_subops_perf_vs_vllm():
-    torch.manual_seed(2026)
-    device = "cuda"
-
-    qr = torch.randn((128, 64 * 576), device=device, dtype=torch.bfloat16)
-    kv = torch.randn((128, 576), device=device, dtype=torch.bfloat16)
-    q_weight = torch.randn((64 * 576,), device=device, dtype=torch.bfloat16)
-    kv_weight = torch.randn((576,), device=device, dtype=torch.bfloat16)
-
-    fg_rms = _bench_ms(dsv4_fused_q_kv_rmsnorm, qr, kv, q_weight, kv_weight, 1e-6)
-    vl_rms = _bench_ms(vllm_fused_q_kv_rmsnorm, qr, kv, q_weight, kv_weight, 1e-6)
-
-    cache = _build_decode_cache(512, 64, 576, 64, device)
-    out_fg = torch.empty((1, 512, 576), device=device, dtype=torch.bfloat16)
-    out_vl = torch.empty_like(out_fg)
-    seq_lens = torch.tensor([512], device=device, dtype=torch.int32)
-    gather_lens = torch.tensor([512], device=device, dtype=torch.int32)
-    block_table = torch.tensor(
-        [[i for i in range(8)]], device=device, dtype=torch.int32
-    )
-
-    fg_gather = _bench_ms(
-        dsv4_dequantize_and_gather_k_cache,
-        out_fg,
-        cache,
-        seq_lens,
-        gather_lens,
-        block_table,
-        64,
-        offset=0,
-        rope_dim=64,
-        nope_dim=512,
-    )
-    vl_gather = _bench_ms(
-        vllm_dequantize_and_gather_k_cache,
-        out_vl,
-        cache,
-        seq_lens,
-        gather_lens,
-        block_table,
-        64,
-        0,
-    )
-
-    topk_indices = torch.randint(0, 256, (256, 64), device=device, dtype=torch.int32)
-    token_to_req = torch.randint(0, 2, (256,), device=device, dtype=torch.int32)
-    blk_tbl = torch.randint(0, 64, (2, 64), device=device, dtype=torch.int32)
-    valid = torch.randint(0, 2, (256,), device=device, dtype=torch.int32)
-
-    fg_global = _bench_ms(
-        dsv4_compute_global_topk_indices_and_lens,
-        topk_indices,
-        token_to_req,
-        blk_tbl,
-        4,
-        valid,
-    )
-    vl_global = _bench_ms(
-        vllm_compute_global_topk_indices_and_lens,
-        topk_indices,
-        token_to_req,
-        blk_tbl,
-        4,
-        valid,
-    )
-
-    query_start_loc = torch.tensor([0, 128, 256], device=device, dtype=torch.int32)
-    seq_lens2 = torch.tensor([1024, 1024], device=device, dtype=torch.int32)
-    gather_lens2 = torch.tensor([512, 512], device=device, dtype=torch.int32)
-    topk2 = torch.randint(0, 256, (256, 64), device=device, dtype=torch.int32)
-    fg_combine = _bench_ms(
-        dsv4_combine_topk_swa_indices,
-        topk2,
-        query_start_loc,
-        seq_lens2,
-        gather_lens2,
-        64,
-        2,
-        64,
-        256,
-        512,
-    )
-    vl_combine = _bench_ms(
-        vllm_combine_topk_swa_indices,
-        topk2,
-        query_start_loc,
-        seq_lens2,
-        gather_lens2,
-        64,
-        2,
-        64,
-        256,
-        512,
-    )
-
-    print(
-        "[dsv4 subops perf] "
-        f"rms fg/vl={fg_rms:.4f}/{vl_rms:.4f}ms, "
-        f"gather fg/vl={fg_gather:.4f}/{vl_gather:.4f}ms, "
-        f"global fg/vl={fg_global:.4f}/{vl_global:.4f}ms, "
-        f"combine fg/vl={fg_combine:.4f}/{vl_combine:.4f}ms"
-    )
-    assert (
-        min(
-            fg_rms,
-            vl_rms,
-            fg_gather,
-            vl_gather,
-            fg_global,
-            vl_global,
-            fg_combine,
-            vl_combine,
-        )
-        > 0
-    )
+    case = _build_subops_case()
+    DSV4RMSNormVsVLLMBenchmark(case).run()
+    DSV4GatherVsVLLMBenchmark(case).run()
+    DSV4GlobalTopkVsVLLMBenchmark(case).run()
+    DSV4CombineTopkVsVLLMBenchmark(case).run()
