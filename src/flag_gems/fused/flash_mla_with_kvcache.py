@@ -2484,8 +2484,12 @@ def _dense_decode_dispatch(
 
     # KV cache: [num_blocks, page_block_size, num_heads_k, head_dim_k]
     # Flatten to [num_tokens_total, head_dim_k] for paged access
-    kv_flat = kv_cache.view(-1, head_dim_k).contiguous()
-    block_table = block_table.contiguous()
+    if kv_cache.is_contiguous():
+        kv_flat = kv_cache.view(-1, head_dim_k)
+    else:
+        kv_flat = kv_cache.contiguous().view(-1, head_dim_k)
+    if not block_table.is_contiguous():
+        block_table = block_table.contiguous()
 
     max_pages_per_seq = block_table.shape[1]
     num_splits = _choose_split_count(max_pages_per_seq, DENSE_SPLIT_PAGE_THRESHOLD)
