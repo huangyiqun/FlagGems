@@ -390,17 +390,13 @@ def _sparse_decode_v32_raw_kernel(
         kv_ids = tl.load(t_base + t_offs, mask=t_offs < TOPK, other=-1)
         block_ids = kv_ids // PAGE_SIZE
         rel_ids = kv_ids - block_ids * PAGE_SIZE
-        valid_ids = (
-            (kv_ids >= 0) & (block_ids < NUM_BLOCKS) & (t_offs < TOPK)
-        )
+        valid_ids = (kv_ids >= 0) & (block_ids < NUM_BLOCKS) & (t_offs < TOPK)
         kv_ids = tl.where(valid_ids, kv_ids, 0)
         block_ids = tl.where(valid_ids, block_ids, 0)
         rel_ids = tl.where(valid_ids, rel_ids, 0)
 
         token_base = (
-            kv_u8
-            + block_ids.to(tl.int64) * stride_kv_block
-            + rel_ids * stride_kv_page
+            kv_u8 + block_ids.to(tl.int64) * stride_kv_block + rel_ids * stride_kv_page
         )
         kv_fp8_0_u8 = tl.load(
             token_base[None, :] + offs_d[:, None],
@@ -703,9 +699,7 @@ def _sparse_decode_v32_raw_split_kernel(
         rel_ids = tl.where(valid_ids, rel_ids, 0)
 
         token_base = (
-            kv_u8
-            + block_ids.to(tl.int64) * stride_kv_block
-            + rel_ids * stride_kv_page
+            kv_u8 + block_ids.to(tl.int64) * stride_kv_block + rel_ids * stride_kv_page
         )
         kv_fp8_0_u8 = tl.load(
             token_base[None, :] + offs_d[:, None],
@@ -1293,7 +1287,9 @@ def _sparse_decode_model1_split_kernel(
         if HAVE_EXTRA:
             block_ids_extra = kv_ids // EXTRA_PAGE_SIZE
             rel_ids_extra = kv_ids - block_ids_extra * EXTRA_PAGE_SIZE
-            valid_extra = pos_valid & (kv_ids >= 0) & (block_ids_extra < EXTRA_NUM_BLOCKS)
+            valid_extra = (
+                pos_valid & (kv_ids >= 0) & (block_ids_extra < EXTRA_NUM_BLOCKS)
+            )
             token_base_main = (
                 kv
                 + block_ids_main.to(tl.int64) * stride_kv_block
@@ -2095,10 +2091,10 @@ def _sparse_decode_dispatch(
     skv = kv.shape[0] * page_block_size
 
     if head_dim_k == 512:
-        total_sparse_k = topk + (extra_indices.shape[-1] if extra_indices is not None else 0)
-        num_splits = _choose_split_count(
-            total_sparse_k, SPARSE_MODEL1_SPLIT_THRESHOLD
+        total_sparse_k = topk + (
+            extra_indices.shape[-1] if extra_indices is not None else 0
         )
+        num_splits = _choose_split_count(total_sparse_k, SPARSE_MODEL1_SPLIT_THRESHOLD)
         if num_splits > 1:
             BK = 32
             split_size = _ceil_to_multiple(math.ceil(total_sparse_k / num_splits), BK)
