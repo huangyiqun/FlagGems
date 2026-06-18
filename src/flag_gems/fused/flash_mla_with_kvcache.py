@@ -3903,45 +3903,6 @@ if HAS_TLE:
                 )
             k0_l_writer.commit(pair)
 
-            # Load page1 right half (NoPE [256:512])
-            k1_r_slot = k1_r_writer.acquire(pair)
-            for tile in tl.static_range(0, DPH, 64):
-                k_cols = DPH + tile + offs_tile
-                k_cols_b = tl.broadcast_to(k_cols[None, :], (BK, 64))
-                k1_r_ptr = (
-                    kv_base + base1 + offs_t[:, None] * stride_kvn + k_cols[None, :]
-                )
-                k1_r_msk = valid1[:, None] & (k_cols < D)[None, :]
-                k1_r_blk = tl.load(
-                    k1_r_ptr, mask=k1_r_msk, other=0.0, eviction_policy="evict_last"
-                )
-                tl.store(
-                    tle.gpu.local_ptr(k1_r_slot.sK, (kv_tile_rows, k_cols_b)),
-                    k1_r_blk,
-                    mask=k1_r_msk,
-                )
-            if HAVE_TAIL:
-                offs_td = tl.arange(0, TDP)
-                k1_r_tail_ptr = (
-                    kv_base
-                    + base1
-                    + offs_t[:, None] * stride_kvn
-                    + (D + offs_td)[None, :]
-                )
-                k1_r_tail_msk = valid1[:, None] & (offs_td < TD)[None, :]
-                k1_r_tail_blk = tl.load(
-                    k1_r_tail_ptr,
-                    mask=k1_r_tail_msk,
-                    other=0.0,
-                    eviction_policy="evict_last",
-                )
-                tl.store(
-                    tle.gpu.local_ptr(k1_r_slot.sK_tail),
-                    k1_r_tail_blk,
-                    mask=k1_r_tail_msk,
-                )
-            k1_r_writer.commit(pair)
-
             # Load page0 right half (NoPE [256:512])
             k0_r_slot = k0_r_writer.acquire(pair)
             for tile in tl.static_range(0, DPH, 64):
@@ -3999,6 +3960,45 @@ if HAS_TLE:
                     mask=k1_l_msk,
                 )
             k1_l_writer.commit(pair)
+
+            # Load page1 right half (NoPE [256:512])
+            k1_r_slot = k1_r_writer.acquire(pair)
+            for tile in tl.static_range(0, DPH, 64):
+                k_cols = DPH + tile + offs_tile
+                k_cols_b = tl.broadcast_to(k_cols[None, :], (BK, 64))
+                k1_r_ptr = (
+                    kv_base + base1 + offs_t[:, None] * stride_kvn + k_cols[None, :]
+                )
+                k1_r_msk = valid1[:, None] & (k_cols < D)[None, :]
+                k1_r_blk = tl.load(
+                    k1_r_ptr, mask=k1_r_msk, other=0.0, eviction_policy="evict_last"
+                )
+                tl.store(
+                    tle.gpu.local_ptr(k1_r_slot.sK, (kv_tile_rows, k_cols_b)),
+                    k1_r_blk,
+                    mask=k1_r_msk,
+                )
+            if HAVE_TAIL:
+                offs_td = tl.arange(0, TDP)
+                k1_r_tail_ptr = (
+                    kv_base
+                    + base1
+                    + offs_t[:, None] * stride_kvn
+                    + (D + offs_td)[None, :]
+                )
+                k1_r_tail_msk = valid1[:, None] & (offs_td < TD)[None, :]
+                k1_r_tail_blk = tl.load(
+                    k1_r_tail_ptr,
+                    mask=k1_r_tail_msk,
+                    other=0.0,
+                    eviction_policy="evict_last",
+                )
+                tl.store(
+                    tle.gpu.local_ptr(k1_r_slot.sK_tail),
+                    k1_r_tail_blk,
+                    mask=k1_r_tail_msk,
+                )
+            k1_r_writer.commit(pair)
 
     @triton.jit
     def _tle_dense_decode_consumer0(
