@@ -116,7 +116,6 @@ def _gems_wrapper(
     reason="requires vLLM with DeepGEMM MegaMoE support",
 )
 @pytest.mark.fp8_fp4_mega_moe
-@pytest.mark.fp8_fp4_mega_moe_vllm
 def test_fp8_fp4_mega_moe_vllm():
     pytest.skip(
         "vLLM/DeepGEMM fp8_fp4_mega_moe requires a torch.distributed "
@@ -138,7 +137,6 @@ def test_fp8_fp4_mega_moe_vllm():
     reason="requires CUDA with native FP8 support (SM90+)",
 )
 @pytest.mark.fp8_fp4_mega_moe
-@pytest.mark.fp8_fp4_mega_moe_torch_ref
 def test_fp8_fp4_mega_moe_torch_ref():
     bench = FP8FP4MegaMoEBenchmark(
         op_name="fp8_fp4_mega_moe_torch_ref",
