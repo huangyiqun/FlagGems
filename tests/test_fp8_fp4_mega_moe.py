@@ -38,7 +38,7 @@ def _pack_fp4_e2m1(x):
     code = torch.zeros_like(x, dtype=torch.uint8)
     for boundary in (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0):
         code += (ax > boundary).to(torch.uint8)
-    code |= (((x < 0) & (code != 0)).to(torch.uint8) << 3)
+    code |= ((x < 0) & (code != 0)).to(torch.uint8) << 3
     packed = (code[..., 0::2] & 0x0F) | ((code[..., 1::2] & 0x0F) << 4)
     return packed.contiguous().view(torch.int8)
 

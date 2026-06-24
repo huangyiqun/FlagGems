@@ -12,8 +12,9 @@ except ImportError:
     VLLM_AVAILABLE = False
     SM100_AVAILABLE = False
 
-from . import base
 from tests.test_fp8_fp4_mega_moe import _build_inputs
+
+from . import base
 
 
 class FP8FP4MegaMoEBenchmark(base.Benchmark):

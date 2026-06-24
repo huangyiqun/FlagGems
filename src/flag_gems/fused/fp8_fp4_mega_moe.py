@@ -33,7 +33,11 @@ def _decode_e2m1(code):
                 tl.where(
                     idx == 3,
                     1.5,
-                    tl.where(idx == 4, 2.0, tl.where(idx == 5, 3.0, tl.where(idx == 6, 4.0, 6.0))),
+                    tl.where(
+                        idx == 4,
+                        2.0,
+                        tl.where(idx == 5, 3.0, tl.where(idx == 6, 4.0, 6.0)),
+                    ),
                 ),
             ),
         ),
@@ -161,7 +165,12 @@ def _fp8_fp4_mega_moe_l1_kernel(
         )
         acc += tl.sum(w * x[None, :], axis=1)
 
-    out_ptrs = l1_out_ptr + pid_m * stride_out_m + pid_topk * stride_out_k + n_offsets * stride_out_n
+    out_ptrs = (
+        l1_out_ptr
+        + pid_m * stride_out_m
+        + pid_topk * stride_out_k
+        + n_offsets * stride_out_n
+    )
     tl.store(out_ptrs, acc, mask=valid_expert & (n_offsets < 2 * I))
 
 
@@ -206,7 +215,11 @@ def _fp8_fp4_mega_moe_l2_kernel(
     for tk in range(0, TOP_K):
         expert = tl.load(topk_idx_ptr + pid_m * stride_topkm + tk * stride_topkk)
         valid_expert = expert >= 0
-        route_w = tl.load(topk_weights_ptr + pid_m * stride_twm + tk * stride_twk, mask=valid_expert, other=0.0)
+        route_w = tl.load(
+            topk_weights_ptr + pid_m * stride_twm + tk * stride_twk,
+            mask=valid_expert,
+            other=0.0,
+        )
         expert_acc = tl.zeros([BLOCK_H], dtype=tl.float32)
 
         for i0 in range(0, I, BLOCK_I):
@@ -217,7 +230,10 @@ def _fp8_fp4_mega_moe_l2_kernel(
                 other=0.0,
             ).to(tl.float32)
             up = tl.load(
-                l1_out_ptr + pid_m * stride_l1_m + tk * stride_l1_k + (I + is_) * stride_l1_n,
+                l1_out_ptr
+                + pid_m * stride_l1_m
+                + tk * stride_l1_k
+                + (I + is_) * stride_l1_n,
                 mask=(is_ < I) & valid_expert,
                 other=0.0,
             ).to(tl.float32)
@@ -302,10 +318,14 @@ def fp8_fp4_mega_moe(
 
     scale_is_ue8m0 = _check_supported_scales(l1_scales, "l1_scales")
     if _check_supported_scales(l2_scales, "l2_scales") != scale_is_ue8m0:
-        raise TypeError("l1_scales and l2_scales must use the same scale representation")
+        raise TypeError(
+            "l1_scales and l2_scales must use the same scale representation"
+        )
 
     if out is None:
-        out = torch.empty((num_tokens, hidden), device=x_fp8.device, dtype=torch.bfloat16)
+        out = torch.empty(
+            (num_tokens, hidden), device=x_fp8.device, dtype=torch.bfloat16
+        )
     if out.shape != (num_tokens, hidden):
         raise ValueError("out must be [num_tokens, hidden]")
 
@@ -382,7 +402,9 @@ def fp8_fp4_mega_moe(
             BLOCK_H=block_h,
             BLOCK_I=block_i,
             SCALE_IS_UE8M0=scale_is_ue8m0,
-            ACTIVATION_CLAMP=-1.0 if activation_clamp is None else float(activation_clamp),
+            ACTIVATION_CLAMP=-1.0
+            if activation_clamp is None
+            else float(activation_clamp),
         )
     return out
 
@@ -396,7 +418,11 @@ def _unpack_fp4_e2m1_torch(packed: torch.Tensor) -> torch.Tensor:
     p = packed.to(torch.uint8)
     lo = p & 0x0F
     hi = (p >> 4) & 0x0F
-    codes = torch.empty((*packed.shape[:-1], packed.shape[-1] * 2), device=packed.device, dtype=torch.uint8)
+    codes = torch.empty(
+        (*packed.shape[:-1], packed.shape[-1] * 2),
+        device=packed.device,
+        dtype=torch.uint8,
+    )
     codes[..., 0::2] = lo
     codes[..., 1::2] = hi
     mag = values[(codes & 0x07).long()]
@@ -424,8 +450,12 @@ def fp8_fp4_mega_moe_torch_ref(
     activation_clamp: float | None = None,
 ) -> torch.Tensor:
     x = x_fp8.float() * _expand_scale_torch(x_scale, x_fp8.shape[-1])
-    l1 = _unpack_fp4_e2m1_torch(l1_weights) * _expand_scale_torch(l1_scales, l1_weights.shape[-1] * 2)
-    l2 = _unpack_fp4_e2m1_torch(l2_weights) * _expand_scale_torch(l2_scales, l2_weights.shape[-1] * 2)
+    l1 = _unpack_fp4_e2m1_torch(l1_weights) * _expand_scale_torch(
+        l1_scales, l1_weights.shape[-1] * 2
+    )
+    l2 = _unpack_fp4_e2m1_torch(l2_weights) * _expand_scale_torch(
+        l2_scales, l2_weights.shape[-1] * 2
+    )
 
     num_tokens, hidden = x.shape
     intermediate = l2.shape[-1]
@@ -442,5 +472,7 @@ def fp8_fp4_mega_moe_torch_ref(
                 gate = gate.clamp(-activation_clamp, activation_clamp)
                 up = up.clamp(-activation_clamp, activation_clamp)
             act = torch.nn.functional.silu(gate) * up
-            out[token] += topk_weights[token, slot].float() * torch.matmul(l2[expert], act)
+            out[token] += topk_weights[token, slot].float() * torch.matmul(
+                l2[expert], act
+            )
     return out
