@@ -113,14 +113,6 @@ def test_mm_out_vllm_tma_column_major_weight():
 
 
 @pytest.mark.mm
-# @pytest.mark.xfail(
-#     strict=True,
-#     reason=(
-#         "Documents the vLLM host-TMA descriptor failure when a column-major "
-#         "BF16 weight reaches mm_kernel_general_host_tma without its block_shape "
-#         "being synchronized by the tuner pre-hook."
-#     ),
-# )
 def test_mm_kernel_general_host_tma_vllm_column_major_weight_compile_error():
     """Reproduce the vLLM TMA descriptor compile error for a column-major BF16 weight."""
     from triton.tools.tensor_descriptor import TensorDescriptor
