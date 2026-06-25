@@ -11,7 +11,7 @@ from flag_gems.utils.shape_utils import can_use_int32_index
 
 from ..utils import TOTAL_CORE_NUM
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 
 
 @libentry()
@@ -194,7 +194,7 @@ def triu_(A, diagonal=0):
 
     if not can_use_directly:
         logger.debug(
-            "Input tensor does not satisfy contiguity requirements, "
+            "GEMS_CAMBRICON Input tensor does not satisfy contiguity requirements, "
             "using temporary tensor for computation"
         )
 

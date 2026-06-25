@@ -10,7 +10,7 @@ from flag_gems.utils import libentry
 
 from ..utils import MAX_GRID_SIZE_X, cfggen_reduce_op
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 MAX_NRAM_C_FORWARD = 16384 * 2
 
 

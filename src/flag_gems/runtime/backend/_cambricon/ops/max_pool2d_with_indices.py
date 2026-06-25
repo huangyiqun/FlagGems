@@ -9,7 +9,7 @@ from flag_gems.utils.limits import get_dtype_min
 
 from ..utils import MAX_GRID_SIZE_X, MAX_GRID_SIZE_Y
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 
 
 def max_pool2d_output_size(

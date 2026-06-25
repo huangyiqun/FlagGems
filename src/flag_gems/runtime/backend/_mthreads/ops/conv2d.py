@@ -7,9 +7,7 @@ import triton.language as tl
 from flag_gems import runtime
 from flag_gems.utils import libentry
 
-logger = logging.getLogger(
-    f'flag_gems.runtime.backend._mthreads.ops.{__name__.split(".")[-1]}'
-)
+logger = logging.getLogger(__name__)
 
 
 def conv2d_output_size(

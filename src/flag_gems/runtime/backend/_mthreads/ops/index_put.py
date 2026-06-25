@@ -8,9 +8,7 @@ import torch
 from flag_gems.utils.code_cache import code_cache_dir
 from flag_gems.utils.code_utils import IndentedBuffer, write_atomic
 
-logger = logging.getLogger(
-    f"flag_gems.runtime.backend._mthreads.ops.{__name__.split('.')[-1]}"
-)
+logger = logging.getLogger(__name__)
 
 
 def get_max_rank_shape(indices: List[torch.Tensor]) -> List[int]:
@@ -482,7 +480,7 @@ def index_put_(inp, indices, values, accumulate=False):
 
 
 def _index_put_impl_(inp, indices, values, accumulate=False, unsafe=False):
-    logger.debug("GEMS_MTHREADS _INDEX_PUT_IMPL_")
+    logger.debug("GEMS_MTHREADS INDEX_PUT_IMPL_")
 
     # The `unsafe` parameter is a hint to PyTorch for bounds checking.
     # Our implementation always performs bounds checking, so we ignore this parameter.

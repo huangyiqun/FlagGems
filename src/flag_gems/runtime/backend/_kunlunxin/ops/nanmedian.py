@@ -13,7 +13,7 @@ from flag_gems.utils.limits import get_dtype_max, get_dtype_min
 
 from .sort import convert_to_uint_preverse_order
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 
 NanMedian = namedtuple("nanmedian", ["values", "indices"])
 MAX_BLOCK_N = 128

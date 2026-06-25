@@ -5,7 +5,7 @@ import triton.language as tl
 
 from flag_gems.utils import pointwise_dynamic
 
-logger = logging.getLogger(f'flag_gems.runtime._ascend.ops.{__name__.split(".")[-1]}')
+logger = logging.getLogger(__name__)
 
 
 @pointwise_dynamic(is_tensor=[True, False, False], promotion_methods=[(0, "DEFAULT")])

@@ -12,7 +12,7 @@ from flag_gems.utils import dim_compress, libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
 
 shortname = __name__.split(".")[-1]
-logger = logging.getLogger(f"flag_gems.runtime.backend._mthreads.ops.{shortname}")
+logger = logging.getLogger(__name__)
 
 NAIVE_REDUCTION_CONFIGS = [
     triton.Config({"BLOCK_M": 4, "BLOCK_N": 1024}, num_warps=4),

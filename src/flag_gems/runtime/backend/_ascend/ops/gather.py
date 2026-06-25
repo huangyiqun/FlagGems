@@ -7,7 +7,7 @@ import triton.language as tl
 from flag_gems.utils import libentry
 from flag_gems.utils.shape_utils import restride_dim
 
-logger = logging.getLogger(f'flag_gems.runtime._ascend.ops.{__name__.split(".")[-1]}')
+logger = logging.getLogger(__name__)
 UB_SIZE_BYTES = 192 * 1024
 
 

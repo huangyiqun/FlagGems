@@ -256,7 +256,7 @@ _index_put_func = IndexPutFunction()
 
 
 def index_put(inp, indices, values, accumulate=False):
-    logger.debug("GEMS INDEX PUT")
+    logger.debug("GEMS_ENFLAME INDEX PUT")
 
     indices = list(indices)
     if len(indices) == 1 and indices[0].dtype == torch.bool:
@@ -317,7 +317,7 @@ def index_put(inp, indices, values, accumulate=False):
 
 
 def index_put_(inp, indices, values, accumulate=False):
-    logger.debug("GEMS INDEX PUT_")
+    logger.debug("GEMS_ENFLAME INDEX PUT_")
 
     indices = list(indices)
     if len(indices) == 1 and indices[0].dtype == torch.bool:

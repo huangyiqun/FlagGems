@@ -7,7 +7,7 @@ from triton import language as tl
 from flag_gems.ops.mv import mv
 from flag_gems.utils import libentry
 
-logger = logging.getLogger(f'flag_gems.runtime._ascend.ops.{__name__.split(".")[-1]}')
+logger = logging.getLogger(__name__)
 
 
 # The outer kernel requires 3 parameters to determine the splitting method,

@@ -264,14 +264,14 @@ _index_put_func = IndexPutFunction()
 
 
 def index_put(inp, indices, values, accumulate=False):
-    logger.debug("GEMS INDEX PUT")
+    logger.debug("GEMS_SUNRISE INDEX PUT")
 
     out = inp.clone()
     return index_put_(out, indices, values, accumulate)
 
 
 def index_put_(inp, indices, values, accumulate=False):
-    logger.debug("GEMS INDEX PUT_")
+    logger.debug("GEMS_SUNRISE INDEX PUT_")
 
     indices = list(indices)
 
@@ -365,7 +365,7 @@ def index_put_(inp, indices, values, accumulate=False):
 
 
 def _index_put_impl_(inp, indices, values, accumulate=False, unsafe=False):
-    logger.debug("GEMS _INDEX_PUT_IMPL_")
+    logger.debug("GEMS_SUNRISE INDEX_PUT_IMPL_")
 
     # The `unsafe` parameter is a hint to PyTorch for bounds checking.
     # Our implementation always performs bounds checking, so we ignore this parameter.

@@ -11,7 +11,7 @@ from flag_gems.utils import libentry, libtuner, tl_extra_shim
 from ..utils import TOTAL_CORE_NUM
 from ..utils.pointwise_dynamic import pointwise_dynamic
 
-logger = logging.getLogger("flag_gems").getChild(__name__.lstrip("."))
+logger = logging.getLogger(__name__)
 
 exp = tl_extra_shim.exp
 
