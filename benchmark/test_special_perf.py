@@ -36,10 +36,6 @@ def resolve_conj_input_fn(shape, dtype, device):
     yield x.conj(),
 
 
-def _underscore_mark(name):
-    return MarkDecorator(Mark(name, (), {}))
-
-
 special_operations = [
     # Sorting Operations
     ("topk", torch.topk, FLOAT_DTYPES, topk_input_fn),
@@ -93,7 +89,7 @@ def test_isin_perf():
 
 
 @pytest.mark.unique
-@_underscore_mark("_unique2")
+@pytest.mark.unique2
 def test_perf_unique():
     def unique_input_fn(shape, dtype, device):
         inp = generate_tensor_input(shape, dtype, device)
@@ -210,7 +206,6 @@ class UpsampleBenchmark(GenericBenchmark):
 
 
 @pytest.mark.upsample_bicubic2d_aa
-@_underscore_mark("_upsample_bicubic2d_aa")
 def test_perf_upsample_bicubic2d_aa():
     def upsample_bicubic2d_aa_input_fn(shape, dtype, device):
         batch, channel, height, weight = shape
