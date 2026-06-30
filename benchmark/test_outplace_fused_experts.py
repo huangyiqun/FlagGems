@@ -90,17 +90,6 @@ def _vllm_outplace_fused_experts_wrapper(hidden_states, w1, w2, topk_weights, to
     )
 
 
-def _gems_outplace_fused_experts_wrapper(hidden_states, w1, w2, topk_weights, topk_ids):
-    """Wrapper to call FlagGems outplace_fused_experts."""
-    return flag_gems.outplace_fused_experts(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-    )
-
-
 @pytest.mark.outplace_fused_experts
 @pytest.mark.skipif(not HAS_VLLM_FUSED_MOE, reason="vLLM not installed")
 def test_outplace_fused_experts_gems_vs_vllm():
@@ -112,5 +101,5 @@ def test_outplace_fused_experts_gems_vs_vllm():
         torch_op=_vllm_outplace_fused_experts_wrapper,
         dtypes=[torch.bfloat16, torch.float16],
     )
-    bench.set_gems(_gems_outplace_fused_experts_wrapper)
+    bench.set_gems(flag_gems.outplace_fused_experts)
     bench.run()
