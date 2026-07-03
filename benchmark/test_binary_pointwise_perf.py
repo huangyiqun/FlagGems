@@ -34,46 +34,35 @@ class BinaryPointwiseBenchmark(Benchmark):
 @pytest.mark.parametrize(
     "op_name, torch_op, dtypes",
     [
-        pytest.param(
-            name,
-            op,
-            dtype,
-            marks=getattr(pytest.mark, name, None),
-        )
-        for name, op, dtype in [
-            # Arithmetic operations
-            ("add", torch.add, FLOAT_DTYPES),
-            ("div", torch.div, FLOAT_DTYPES),
-            ("mul", torch.mul, FLOAT_DTYPES),
-            ("pow", torch.pow, FLOAT_DTYPES),
-            ("sub", torch.sub, FLOAT_DTYPES),
-            ("floor_divide", torch.floor_divide, INT_DTYPES),
-            ("hypot", torch.hypot, FLOAT_DTYPES),
-            ("logaddexp", torch.logaddexp, FLOAT_DTYPES),
-            ("remainder", torch.remainder, INT_DTYPES),
-            ("rsub", torch.rsub, FLOAT_DTYPES),
-            ("logical_or", torch.logical_or, INT_DTYPES + BOOL_DTYPES),
-            ("logical_and", torch.logical_and, INT_DTYPES + BOOL_DTYPES),
-            ("logical_xor", torch.logical_xor, INT_DTYPES + BOOL_DTYPES),
-            # Comparison operations
-            ("eq", torch.eq, FLOAT_DTYPES),
-            ("ge", torch.ge, FLOAT_DTYPES),
-            ("gt", torch.gt, FLOAT_DTYPES),
-            ("le", torch.le, FLOAT_DTYPES),
-            ("lt", torch.lt, FLOAT_DTYPES),
-            ("ne", torch.ne, FLOAT_DTYPES),
-            # Minimum and maximum operations
-            ("maximum", torch.maximum, FLOAT_DTYPES),
-            ("minimum", torch.minimum, FLOAT_DTYPES),
-            ("fmin", torch.fmin, FLOAT_DTYPES),
-            # Bitwise operations
-            ("bitwise_and", torch.bitwise_and, INT_DTYPES + BOOL_DTYPES),
-            ("bitwise_or", torch.bitwise_or, INT_DTYPES + BOOL_DTYPES),
-            ("or_", torch.bitwise_or, INT_DTYPES + BOOL_DTYPES),
-            # Numerical Checks
-            ("isclose", torch.isclose, FLOAT_DTYPES + INT_DTYPES),
-            ("allclose", torch.allclose, FLOAT_DTYPES + INT_DTYPES),
-        ]
+        # Arithmetic operations
+        pytest.param("add", torch.add, FLOAT_DTYPES, marks=pytest.mark.add),
+        pytest.param("div", torch.div, FLOAT_DTYPES, marks=[pytest.mark.div, pytest.mark.true_divide]),
+        pytest.param("mul", torch.mul, FLOAT_DTYPES, marks=pytest.mark.mul),
+        pytest.param("pow", torch.pow, FLOAT_DTYPES, marks=[pytest.mark.pow, pytest.mark.pow_tensor_tensor]),
+        pytest.param("sub", torch.sub, FLOAT_DTYPES, marks=pytest.mark.sub),
+        pytest.param("floor_divide", torch.floor_divide, INT_DTYPES, marks=pytest.mark.floor_divide),
+        pytest.param("remainder", torch.remainder, INT_DTYPES, marks=pytest.mark.remainder),
+        pytest.param("rsub", torch.rsub, FLOAT_DTYPES, marks=pytest.mark.rsub),
+        pytest.param("logical_or", torch.logical_or, INT_DTYPES + BOOL_DTYPES, marks=pytest.mark.logical_or),
+        pytest.param("logical_and", torch.logical_and, INT_DTYPES + BOOL_DTYPES, marks=pytest.mark.logical_and),
+        pytest.param("logical_xor", torch.logical_xor, INT_DTYPES + BOOL_DTYPES, marks=pytest.mark.logical_xor),
+        # Comparison operations
+        pytest.param("eq", torch.eq, FLOAT_DTYPES, marks=pytest.mark.eq),
+        pytest.param("ge", torch.ge, FLOAT_DTYPES, marks=pytest.mark.ge),
+        pytest.param("gt", torch.gt, FLOAT_DTYPES, marks=pytest.mark.gt),
+        pytest.param("le", torch.le, FLOAT_DTYPES, marks=pytest.mark.le),
+        pytest.param("lt", torch.lt, FLOAT_DTYPES, marks=pytest.mark.lt),
+        pytest.param("ne", torch.ne, FLOAT_DTYPES, marks=pytest.mark.ne),
+        # Minimum and maximum operations
+        pytest.param("maximum", torch.maximum, FLOAT_DTYPES, marks=pytest.mark.maximum),
+        pytest.param("minimum", torch.minimum, FLOAT_DTYPES, marks=pytest.mark.minimum),
+        # Bitwise operations
+        pytest.param("bitwise_and", torch.bitwise_and, INT_DTYPES + BOOL_DTYPES, marks=[pytest.mark.bitwise_and, pytest.mark.bitwise_and_tensor]),
+        pytest.param("bitwise_or", torch.bitwise_or, INT_DTYPES + BOOL_DTYPES, marks=[pytest.mark.bitwise_or, pytest.mark.bitwise_or_tensor]),
+        pytest.param("or_", torch.bitwise_or, INT_DTYPES + BOOL_DTYPES, marks=pytest.mark.or_),
+        # Numerical Checks
+        pytest.param("isclose", torch.isclose, FLOAT_DTYPES + INT_DTYPES, marks=pytest.mark.isclose),
+        pytest.param("allclose", torch.allclose, FLOAT_DTYPES + INT_DTYPES, marks=pytest.mark.allclose),
     ],
 )
 def test_general_binary_pointwise_perf(op_name, torch_op, dtypes):

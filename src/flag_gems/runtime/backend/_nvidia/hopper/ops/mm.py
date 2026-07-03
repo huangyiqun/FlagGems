@@ -410,7 +410,7 @@ def general_mm(a, b, c, M, N, K):
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
     )
-    if hasattr(
+    if hasattr(triton.tools, "tensor_descriptor") and hasattr(
         triton.tools.tensor_descriptor, "TensorDescriptor"
     ) and is_tma_compatible(a, b, N, K):
         a_row_major = a.stride(1) == 1
