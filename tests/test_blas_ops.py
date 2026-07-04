@@ -32,6 +32,10 @@ else:
     ]
     FLOAT_DTYPES = ORIG_FLOAT_DTYPES
 
+NONCONTIGUOUS_MNK_SHAPES = [
+    (M, N, K) for M, N, K in MNK_SHAPES if N > 1 and K > 1
+]
+
 
 @pytest.mark.addmm
 @pytest.mark.parametrize("M, N, K", MNK_SHAPES)
@@ -164,7 +168,7 @@ def test_accuracy_bmm_out(M, N, K, dtype):
 
 
 @pytest.mark.bmm
-@pytest.mark.parametrize("M, N, K", MNK_SHAPES)
+@pytest.mark.parametrize("M, N, K", NONCONTIGUOUS_MNK_SHAPES)
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_accuracy_bmm_non_contiguous(M, N, K, dtype):
     if flag_gems.vendor_name == "kunlunxin":
@@ -179,10 +183,7 @@ def test_accuracy_bmm_non_contiguous(M, N, K, dtype):
     # make mat2 non-contiguous
     mat2 = mat2_raw.transpose(1, 2)
 
-    if N > 1 and K > 1:
-        assert not mat2.is_contiguous()
-    else:
-        pytest.skip("Skipping non-contiguous test for small N or K")
+    assert not mat2.is_contiguous()
 
     ref_mat1 = to_reference(mat1, True)
     ref_mat2 = to_reference(mat2, True)

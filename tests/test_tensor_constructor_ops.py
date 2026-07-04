@@ -1,3 +1,4 @@
+import itertools
 import math
 
 import pytest
@@ -20,6 +21,20 @@ from .accuracy_utils import (
 from .conftest import TO_CPU
 
 device = flag_gems.device
+
+FULL_LIKE_DTYPES = BOOL_TYPES + ALL_INT_DTYPES + ALL_FLOAT_DTYPES
+FULL_LIKE_FILL_VALUES = [3.1415926, 2, False, float("inf"), float("nan")]
+FULL_LIKE_CASES = [
+    (dtype, xdtype, fill_value)
+    for dtype, xdtype, fill_value in itertools.product(
+        FULL_LIKE_DTYPES, FULL_LIKE_DTYPES, FULL_LIKE_FILL_VALUES
+    )
+    if not (
+        isinstance(fill_value, float)
+        and (math.isinf(fill_value) or math.isnan(fill_value))
+        and (dtype not in ALL_FLOAT_DTYPES or xdtype not in ALL_FLOAT_DTYPES)
+    )
+]
 
 
 @pytest.mark.rand
@@ -166,18 +181,9 @@ def test_accuracy_ones_like(shape, dtype):
 
 @pytest.mark.full_like
 @pytest.mark.parametrize("shape", POINTWISE_SHAPES)
-@pytest.mark.parametrize("dtype", BOOL_TYPES + ALL_INT_DTYPES + ALL_FLOAT_DTYPES)
-@pytest.mark.parametrize("xdtype", BOOL_TYPES + ALL_INT_DTYPES + ALL_FLOAT_DTYPES)
-@pytest.mark.parametrize(
-    "fill_value", [3.1415926, 2, False, float("inf"), float("nan")]
-)
+@pytest.mark.parametrize("dtype, xdtype, fill_value", FULL_LIKE_CASES)
 def test_accuracy_full_like(shape, dtype, xdtype, fill_value):
-    if isinstance(fill_value, float) and (
-        math.isinf(fill_value) or math.isnan(fill_value)
-    ):
-        if dtype not in ALL_FLOAT_DTYPES:
-            pytest.skip("Skipping inf/nan test for non-float dtypes")
-    inp = torch.empty(size=shape, dtype=dtype, device=device)
+    inp = torch.empty(size=shape, dtype=xdtype, device=device)
     ref_inp = to_reference(inp)
 
     # without dtype
