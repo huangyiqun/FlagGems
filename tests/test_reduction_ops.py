@@ -88,31 +88,33 @@ def test_accuracy_amax(shape, dim, keepdim, dtype):
 EMPTY_SHAPES = [(0, 5), (3, 0, 4), (2, 5, 0), (0,)]
 
 
+def valid_argmax_shape_dims():
+    shape_dims = []
+    for shape in REDUCTION_SMALL_SHAPES + EMPTY_SHAPES:
+        rank = len(shape)
+        is_empty_tensor = any(d == 0 for d in shape)
+        for dim in DIM_LIST + [None]:
+            if dim is not None and (rank == 0 or dim >= rank or dim < -rank):
+                continue
+            if is_empty_tensor:
+                if dim is None:
+                    continue
+                if shape[dim % rank] == 0:
+                    continue
+            shape_dims.append((shape, dim))
+    return shape_dims
+
+
+ARGMAX_SHAPE_DIMS = valid_argmax_shape_dims()
+
+
 # TODO: There are some bugs in argmax with large size.
 @pytest.mark.argmax
-@pytest.mark.parametrize("shape", REDUCTION_SMALL_SHAPES + EMPTY_SHAPES)
-@pytest.mark.parametrize("dim", DIM_LIST + [None])
+@pytest.mark.parametrize("shape, dim", ARGMAX_SHAPE_DIMS)
 @pytest.mark.parametrize("keepdim", [True, False])
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_accuracy_argmax(shape, dim, keepdim, dtype):
-    rank = len(shape)
     is_empty_tensor = any(d == 0 for d in shape)
-
-    if dim is not None:
-        if rank == 0 or dim >= rank or dim < -rank:
-            pytest.skip(f"Dimension {dim} is out of bounds for shape {shape}")
-
-    if is_empty_tensor:
-        if dim is None:
-            pytest.skip(
-                "PyTorch reference requires dim specification for empty tensor."
-            )
-
-        dim_index = dim % rank
-        if shape[dim_index] == 0:
-            pytest.skip(
-                f"PyTorch reference prohibits reduction on zero-sized dimension ({dim})."
-            )
 
     if is_empty_tensor:
         inp = torch.empty(shape, dtype=dtype, device=flag_gems.device)

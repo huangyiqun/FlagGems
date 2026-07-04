@@ -406,9 +406,6 @@ def test_accuracy_instancenorm(
 WEIGHT_NORM_SHAPE_DIM = list(zip(REDUCTION_SHAPES, [-1] if QUICK_MODE else [0, -1, 1]))
 
 
-@pytest.mark.skipif(
-    True, reason="Temporarely skip for ci"
-)  # todo: improve backward precision
 @pytest.mark.weight_norm
 @pytest.mark.parametrize("shape, dim", WEIGHT_NORM_SHAPE_DIM)
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
@@ -480,7 +477,6 @@ def test_accuracy_weightnorm_interface(shape, dtype, dim):
 @pytest.mark.skipif(
     True, reason="Temporarely skip for ci"
 )  # todo: improve backward precision
-@pytest.mark.weight_norm
 @pytest.mark.parametrize("shape, dim", WEIGHT_NORM_INTERFACE_SHAPE_DIM)
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_accuracy_weightnorm_interface_backward(shape, dtype, dim):

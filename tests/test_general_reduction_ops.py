@@ -198,8 +198,7 @@ def test_accuracy_max_without_dim_all_neg_inf(shape, dtype):
     gems_assert_equal(res_out, ref_out)
 
 
-# cambricon add
-@pytest.mark.max
+# cambricon/metax only
 @pytest.mark.skipif(
     flag_gems.vendor_name != "cambricon" and flag_gems.vendor_name != "metax",
     reason="cambricon and metax test only",
@@ -217,6 +216,10 @@ def test_accuracy_max_int(shape, dtype):
         res_out = torch.max(inp)
 
     gems_assert_equal(res_out, ref_out)
+
+
+if flag_gems.vendor_name in ["cambricon", "metax"]:
+    test_accuracy_max_int = pytest.mark.max(test_accuracy_max_int)
 
 
 @pytest.mark.max

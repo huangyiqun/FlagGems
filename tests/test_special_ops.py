@@ -334,7 +334,10 @@ def test_accuracy_dropout(shape, p, dtype):
         num_zero = torch.sum(zero_equal).item()
         assert abs(num_zero / res_inp.numel() - p) <= 0.05
         scale_equal = torch.isclose(
-            res_out, ref_inp / one_minus_p, rtol=RESOLUTION[dtype]
+            res_out.to(torch.float32) * float(one_minus_p),
+            ref_inp.to(torch.float32),
+            atol=RESOLUTION[dtype],
+            rtol=RESOLUTION[dtype],
         )
         assert torch.all(torch.logical_or(zero_equal, scale_equal))
     else:
@@ -805,20 +808,30 @@ def test_accuracy_multinomial_without_replacement(pool, dtype):
         assert torch.all(idx_cnt <= 1)
 
 
-@pytest.mark.constant_pad_nd
+PAD_SHAPES = [
+    [1024, 1024],
+    [64, 64, 64, 64],
+    [1, 64, 112, 112],
+    [4, 64, 128],
+]
+PAD_MODES = ["constant", "reflect", "replicate", "circular"]
+PAD_SHAPE_MODES = [
+    pytest.param(
+        shape,
+        pad_mode,
+        marks=pytest.mark.constant_pad_nd if pad_mode == "constant" else (),
+    )
+    for shape in PAD_SHAPES
+    for pad_mode in PAD_MODES
+    if pad_mode == "constant" or len(shape) >= 3
+]
+
+
 @pytest.mark.pad
-@pytest.mark.parametrize(
-    "shape",
-    [[1024, 1024], [64, 64, 64, 64], [1, 64, 112, 112], [4, 64, 128]],
-)
+@pytest.mark.parametrize("shape, pad_mode", PAD_SHAPE_MODES)
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
-@pytest.mark.parametrize("pad_mode", ["constant", "reflect", "replicate", "circular"])
 @pytest.mark.parametrize("contiguous", [True, False])
 def test_pad(shape, dtype, pad_mode, contiguous):
-    rank = len(shape)
-    if pad_mode != "constant" and rank < 3:
-        pytest.skip("PyTorch non-constant padding requires 3D+ input tensors")
-
     if flag_gems.vendor_name == "kunlunxin":
         torch.manual_seed(0)
         torch.cuda.manual_seed_all(0)
